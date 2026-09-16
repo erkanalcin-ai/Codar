@@ -1,0 +1,7 @@
+Codar Phase 1 TXT spike fixture.
+The quick brown fox jumps over the lazy dog.
+Turkish glyph line: ç Ç ğ Ğ ı İ ö Ö ş Ş ü Ü
+İstanbul'da güzel bir gün. şeker, ğölge, ışık, ÖĞRENCİ, ÇALIŞMA.
+CodarSpikePhrase appears here for search verification.
+Second paragraph to give the file a little body. Lorem ipsum dolor sit amet.
+Third paragraph: okuma ilerlemesi ve yer imleri bu metin üzerinde denenecek.

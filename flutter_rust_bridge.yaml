@@ -1,0 +1,4 @@
+# flutter_rust_bridge codegen config (codegen pinned 2.13.0 — never auto-upgrade).
+rust_input: crate::api
+rust_root: rust
+dart_output: lib/src/rust/frb_generated.dart

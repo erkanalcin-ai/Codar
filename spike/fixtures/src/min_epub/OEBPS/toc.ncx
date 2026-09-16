@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <head>
+    <meta name="dtb:uid" content="codar-spike-min-epub"/>
+  </head>
+  <docTitle><text>Codar Spike Fixture</text></docTitle>
+  <navMap>
+    <navPoint id="np1" playOrder="1">
+      <navLabel><text>First Chapter</text></navLabel>
+      <content src="ch1.xhtml"/>
+    </navPoint>
+    <navPoint id="np2" playOrder="2">
+      <navLabel><text>Second Chapter</text></navLabel>
+      <content src="ch2.xhtml"/>
+    </navPoint>
+  </navMap>
+</ncx>

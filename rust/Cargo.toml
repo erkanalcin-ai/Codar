@@ -1,0 +1,22 @@
+[package]
+name = "codar_reader"
+version = "0.1.0"
+edition = "2021"
+description = "Codar Rust Reader Core — isolates Flutter from ebook-rs (Phase 1 spike)"
+license = "MIT"
+
+[lib]
+name = "codar_reader"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+# Phase 0 correction: ONLY ebook-rs 0.16.6, exact pin, minimal features.
+ebook-rs = { version = "=0.16.6", default-features = false, features = ["pdf"] }
+# Must stay in lockstep with the Dart flutter_rust_bridge package (2.13.0).
+flutter_rust_bridge = "=2.13.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+strip = true

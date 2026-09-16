@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
+  <description>
+    <title-info>
+      <genre>antique</genre>
+      <author><first-name>Codar</first-name><last-name>Spike</last-name></author>
+      <book-title>Codar FB2 Fixture</book-title>
+      <lang>en</lang>
+    </title-info>
+  </description>
+  <body name="body1">
+    <title><p>Chapter One</p></title>
+    <section>
+      <title><p>Section A</p></title>
+      <p>The quick brown fox jumps over the lazy dog. CodarSpikePhrase in FB2.</p>
+      <p>Turkish: ç Ç ğ Ğ ı İ ö Ö ş Ş ü Ü.</p>
+    </section>
+    <section>
+      <title><p>Section B</p></title>
+      <p>Second FB2 section for navigation checks.</p>
+    </section>
+  </body>
+</FictionBook>
