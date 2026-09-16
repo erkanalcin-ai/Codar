@@ -58,11 +58,19 @@ class CodarReaderService with ChangeNotifier {
   Future<DocumentInfo> getDocumentInfo(ReaderSession s) =>
       frb.getDocumentInfo(sessionId: s.id);
 
+  Future<frb.CoverImage?> getCover(ReaderSession s) =>
+      frb.getCover(sessionId: s.id);
+
   Future<List<ChapterInfo>> getChapters(ReaderSession s) =>
       frb.getChapters(sessionId: s.id);
 
   Future<SectionContent> getContent(ReaderSession s, int sectionIndex) =>
       frb.getContent(sessionId: s.id, sectionIndex: BigInt.from(sectionIndex));
+
+  Future<int?> findSection(ReaderSession s, String href) async {
+    final v = await frb.findSection(sessionId: s.id, href: href);
+    return v?.toInt();
+  }
 
   Future<SectionContent> getPage(ReaderSession s, int pageIndex) =>
       frb.getPage(sessionId: s.id, pageIndex: BigInt.from(pageIndex));

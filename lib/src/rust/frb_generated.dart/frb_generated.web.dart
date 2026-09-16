@@ -35,7 +35,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool dco_decode_bool(dynamic raw);
 
   @protected
+  CoverImage dco_decode_box_autoadd_cover_image(dynamic raw);
+
+  @protected
+  BigInt dco_decode_box_autoadd_u_64(dynamic raw);
+
+  @protected
   ChapterInfo dco_decode_chapter_info(dynamic raw);
+
+  @protected
+  CoverImage dco_decode_cover_image(dynamic raw);
 
   @protected
   DocumentInfo dco_decode_document_info(dynamic raw);
@@ -63,6 +72,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
+
+  @protected
+  CoverImage? dco_decode_opt_box_autoadd_cover_image(dynamic raw);
+
+  @protected
+  BigInt? dco_decode_opt_box_autoadd_u_64(dynamic raw);
 
   @protected
   PaginationResult dco_decode_pagination_result(dynamic raw);
@@ -101,7 +116,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
+  CoverImage sse_decode_box_autoadd_cover_image(SseDeserializer deserializer);
+
+  @protected
+  BigInt sse_decode_box_autoadd_u_64(SseDeserializer deserializer);
+
+  @protected
   ChapterInfo sse_decode_chapter_info(SseDeserializer deserializer);
+
+  @protected
+  CoverImage sse_decode_cover_image(SseDeserializer deserializer);
 
   @protected
   DocumentInfo sse_decode_document_info(SseDeserializer deserializer);
@@ -129,6 +153,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
+
+  @protected
+  CoverImage? sse_decode_opt_box_autoadd_cover_image(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  BigInt? sse_decode_opt_box_autoadd_u_64(SseDeserializer deserializer);
 
   @protected
   PaginationResult sse_decode_pagination_result(SseDeserializer deserializer);
@@ -170,7 +202,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_cover_image(
+    CoverImage self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_u_64(BigInt self, SseSerializer serializer);
+
+  @protected
   void sse_encode_chapter_info(ChapterInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_cover_image(CoverImage self, SseSerializer serializer);
 
   @protected
   void sse_encode_document_info(DocumentInfo self, SseSerializer serializer);
@@ -210,6 +254,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_cover_image(
+    CoverImage? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_u_64(BigInt? self, SseSerializer serializer);
 
   @protected
   void sse_encode_pagination_result(

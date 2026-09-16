@@ -13,7 +13,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'reader.freezed.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Open a book file. Creates exactly one session; caller must `close_book`.
 Future<OpenBookResult> openBook({required String path}) =>
@@ -26,6 +26,12 @@ Future<bool> closeBook({required BigInt sessionId}) =>
 /// Live session count (lifecycle/soak observability).
 Future<BigInt> liveSessionCount() =>
     RustLib.instance.api.crateApiReaderLiveSessionCount();
+
+/// Cover image for an open session (`None` when the book has none).
+/// Bytes are written to app-private storage by the caller, never to
+/// `Downloads/CodarLib/`.
+Future<CoverImage?> getCover({required BigInt sessionId}) =>
+    RustLib.instance.api.crateApiReaderGetCover(sessionId: sessionId);
 
 /// Document info for an open session.
 Future<DocumentInfo> getDocumentInfo({required BigInt sessionId}) =>
@@ -42,6 +48,16 @@ Future<SectionContent> getContent({
 }) => RustLib.instance.api.crateApiReaderGetContent(
   sessionId: sessionId,
   sectionIndex: sectionIndex,
+);
+
+/// Section index for a spine/manifest href (`None` when unknown).
+/// Used to jump from TOC chapters to content without probing.
+Future<BigInt?> findSection({
+  required BigInt sessionId,
+  required String href,
+}) => RustLib.instance.api.crateApiReaderFindSection(
+  sessionId: sessionId,
+  href: href,
 );
 
 /// Page access. For PDF/CBZ one section IS one page; for reflowable formats
@@ -112,6 +128,25 @@ Future<PaginationResult> paginateSection({
   viewportHeightPx: viewportHeightPx,
   marginPx: marginPx,
 );
+
+/// Cover image payload (bytes + MIME). `None` when the book has no cover.
+class CoverImage {
+  final String mime;
+  final Uint8List data;
+
+  const CoverImage({required this.mime, required this.data});
+
+  @override
+  int get hashCode => mime.hashCode ^ data.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CoverImage &&
+          runtimeType == other.runtimeType &&
+          mime == other.mime &&
+          data == other.data;
+}
 
 /// Result of opening a book: session handle + first-glance info.
 class OpenBookResult {

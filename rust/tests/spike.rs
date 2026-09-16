@@ -405,6 +405,23 @@ fn unsupported_extension_rejected() {
 }
 
 #[test]
+fn api_find_section_and_cover() {
+    let opened = open("min.epub");
+    let found =
+        reader::find_section(opened.session_id, "ch1.xhtml".to_string()).expect("find_section");
+    assert_eq!(found, Some(0));
+    assert_eq!(
+        reader::find_section(opened.session_id, "nope.xhtml".to_string()).expect("find missing"),
+        None
+    );
+    // min.epub has no cover image.
+    assert!(reader::get_cover(opened.session_id)
+        .expect("cover")
+        .is_none());
+    close(opened.session_id);
+}
+
+#[test]
 fn unknown_session_errors() {
     assert!(matches!(
         reader::get_content(999_999_999, 0),

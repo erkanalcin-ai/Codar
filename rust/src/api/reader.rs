@@ -52,6 +52,13 @@ pub struct OpenBookResult {
     pub info: DocumentInfo,
 }
 
+/// Cover image payload (bytes + MIME). `None` when the book has no cover.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoverImage {
+    pub mime: String,
+    pub data: Vec<u8>,
+}
+
 /// Open a book file. Creates exactly one session; caller must `close_book`.
 pub fn open_book(path: String) -> Result<OpenBookResult, ReaderError> {
     let fs_path = Path::new(&path);
@@ -76,6 +83,19 @@ pub fn live_session_count() -> u64 {
     session::live_count()
 }
 
+/// Cover image for an open session (`None` when the book has none).
+/// Bytes are written to app-private storage by the caller, never to
+/// `Downloads/CodarLib/`.
+pub fn get_cover(session_id: u64) -> Result<Option<CoverImage>, ReaderError> {
+    session::with_book(session_id, |b| {
+        b.cover_image().map(|(bytes, mime)| CoverImage {
+            mime: mime.to_string(),
+            data: bytes,
+        })
+    })
+    .ok_or(ReaderError::UnknownSession(session_id))
+}
+
 /// Document info for an open session.
 pub fn get_document_info(session_id: u64) -> Result<DocumentInfo, ReaderError> {
     let meta = session::session_meta(session_id).ok_or(ReaderError::UnknownSession(session_id))?;
@@ -95,6 +115,23 @@ pub fn get_content(session_id: u64, section_index: u64) -> Result<SectionContent
     session::with_book(session_id, |b| content::section_content(b, idx))
         .ok_or(ReaderError::UnknownSession(session_id))?
         .ok_or(ReaderError::InvalidSection(section_index))
+}
+
+/// Section index for a spine/manifest href (`None` when unknown).
+/// Used to jump from TOC chapters to content without probing.
+pub fn find_section(session_id: u64, href: String) -> Result<Option<u64>, ReaderError> {
+    session::with_book(session_id, |b| {
+        b.spine()
+            .iter()
+            .position(|s| s.href == href || s.idref == href)
+            .or_else(|| {
+                b.sections()
+                    .iter()
+                    .position(|s| s.href == href || s.idref == href)
+            })
+            .map(|i| i as u64)
+    })
+    .ok_or(ReaderError::UnknownSession(session_id))
 }
 
 /// Page access. For PDF/CBZ one section IS one page; for reflowable formats
