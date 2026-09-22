@@ -1284,7 +1284,10 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text('${tr(locale, 'errorPrefix')}: ${_displayError(_error!)}'),
+            Text(
+              '${tr(locale, 'errorPrefix')}: '
+              '${_displayError(_error!, locale)}',
+            ),
             const SizedBox(height: 8),
             FilledButton.tonal(
               onPressed: _open,
@@ -1606,7 +1609,10 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     };
   }
 
-  static String _displayError(String raw) {
+  static String _displayError(String raw, String locale) {
+    if (raw.contains('no-file')) {
+      return tr(locale, 'missingFileReimport');
+    }
     // Never leak engine internals: show a short, safe tail.
     final oneLine = raw.replaceAll(RegExp(r'\s+'), ' ').trim();
     if (oneLine.length <= 160) return oneLine;

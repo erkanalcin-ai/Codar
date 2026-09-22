@@ -50,6 +50,7 @@ void main() {
       'version',
       'cfiMismatch',
       'missingFile',
+      'missingFileReimport',
       'recolor',
     ];
     for (final k in keys) {
@@ -133,6 +134,24 @@ void main() {
     expect(back['highlights']!.first['quoted_text'], 'alıntı ğüşöçı');
     // Missing tables default to empty (forward-compatible).
     expect(back['notes'], isEmpty);
+  });
+
+  test('restored book files discard device-bound paths', () {
+    final row = normalizeRestoredBookFile({
+      'book_id': 'backup-id',
+      'kind': 'original',
+      'display_name': 'Kitap.epub',
+      'mime': 'application/epub+zip',
+      'mediastore_uri': 'content://old-device/book',
+      'cache_path': '/old-device/cache/book.epub',
+      'size': 123,
+    }, canonicalBookId: 'local-id');
+    expect(row['book_id'], 'local-id');
+    expect(row['display_name'], 'Kitap.epub');
+    expect(row['mime'], 'application/epub+zip');
+    expect(row['size'], 123);
+    expect(row['mediastore_uri'], isEmpty);
+    expect(row['cache_path'], isEmpty);
   });
 
   test('backup decode rejects bad input', () {

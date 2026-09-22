@@ -1,4 +1,4 @@
-import java.util.Properties
+﻿import java.util.Properties
 import java.io.FileInputStream
 import org.gradle.api.tasks.compile.JavaCompile
 
@@ -92,7 +92,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.codar.codar"
+        applicationId = "codar.app"
         minSdk = 24
         targetSdk = flutter.targetSdkVersion
         ndk {

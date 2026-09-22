@@ -12,15 +12,12 @@ dependencies:
   flutter:
     sdk: flutter
 
-  cupertino_icons: ^1.0.8
-
   # Codar Phase 1 — exact pins per Phase 0 audit.
   flutter_riverpod: 3.4.3
   go_router: 18.0.1
   sqflite: 2.4.3
   path_provider: 2.1.6
   file_picker: 12.2.0
-  shared_preferences: 2.5.5
   intl: 0.20.3
   url_launcher: ^6.3.2
   flutter_rust_bridge: 2.13.0

@@ -409,6 +409,27 @@ class ImportService {
         await books.getBook(bookId) ??
         await books.findByFingerprint(fingerprint);
     if (existing != null) {
+      final existingFile = await books.getFile(existing.bookId, 'original');
+      if (existingFile == null || existingFile.mediastoreUri.isEmpty) {
+        // A JSON backup can preserve the book and its annotations without a
+        // physical file. Reattach that file in place instead of creating a
+        // second book or replacing any user data.
+        final uri = await _storeImportedFile(
+          displayName: displayName,
+          bytes: bytes,
+          mime: mime,
+          sourceUri: sourceUri,
+        );
+        await books.upsertFile(
+          bookId: existing.bookId,
+          kind: 'original',
+          displayName: displayName,
+          mime: mime,
+          mediastoreUri: uri,
+          cachePath: '',
+          size: bytes.length,
+        );
+      }
       await books.touchOpened(existing.bookId);
       return ImportResult(
         bookId: existing.bookId,
@@ -421,18 +442,12 @@ class ImportService {
     // openable, and native storage removes the source only after the
     // CodarLib stream completes successfully. Byte imports remain available
     // for bundled fixtures/tests and use the existing copy path.
-    final uri = sourceUri == null
-        ? await storage.importFile(
-            name: displayName,
-            bytes: Uint8List.fromList(bytes),
-            mime: mime,
-          )
-        : await storage.movePickedFile(
-            name: displayName,
-            mime: mime,
-            sourceUri: sourceUri,
-            size: bytes.length,
-          );
+    final uri = await _storeImportedFile(
+      displayName: displayName,
+      bytes: bytes,
+      mime: mime,
+      sourceUri: sourceUri,
+    );
 
     await books.upsertBook(
       bookId: bookId,
@@ -458,6 +473,26 @@ class ImportService {
     await _extractCover(bookId, ext);
 
     return ImportResult(bookId: bookId, title: title, isNew: true);
+  }
+
+  Future<String> _storeImportedFile({
+    required String displayName,
+    required List<int> bytes,
+    required String mime,
+    String? sourceUri,
+  }) async {
+    return sourceUri == null
+        ? await storage.importFile(
+            name: displayName,
+            bytes: Uint8List.fromList(bytes),
+            mime: mime,
+          )
+        : await storage.movePickedFile(
+            name: displayName,
+            mime: mime,
+            sourceUri: sourceUri,
+            size: bytes.length,
+          );
   }
 
   Future<void> _extractCover(String bookId, String ext) async {
