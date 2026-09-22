@@ -47,6 +47,17 @@ app.*.map.json
 # Widget Preview related
 .widget_preview/
 
+# Codar Phase 4: release signing secrets (never commit).
+/android/key.properties
+/android/*.jks
+/android/*.keystore
+/android/app/codar-release.jks
+/android/app/*.jks
+/android/app/*.keystore
+
 # Codar Phase 1: large vendor fixtures (documented provenance, not committed)
 spike/fixtures/vendor/
+
+# Codex-provided local reference attachments; never part of the application source.
+/.codex-remote-attachments/
 rust/target/

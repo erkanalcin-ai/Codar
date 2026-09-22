@@ -21,73 +21,150 @@ class BooksRepository {
     required int fileSize,
     required String fingerprint,
   }) async {
-    final existing = await _db.db.query('books',
-        columns: ['added_at'], where: 'book_id = ?', whereArgs: [bookId]);
-    final addedAt =
-        existing.isEmpty ? _now() : (existing.first['added_at'] as int?) ?? _now();
-    await _db.db.insert(
+    final existing = await _db.db.query(
       'books',
-      {
-        'book_id': bookId,
-        'title': title,
-        'author': author,
-        'language': language,
-        'format': format,
-        'section_count': sectionCount,
-        'file_size': fileSize,
-        'fingerprint': fingerprint,
-        'added_at': addedAt,
-        'last_opened_at': _now(),
-      },
-      conflictAlgorithm: ConflictAlgorithm.replace,
+      columns: ['added_at'],
+      where: 'book_id = ?',
+      whereArgs: [bookId],
     );
+    final addedAt = existing.isEmpty
+        ? _now()
+        : (existing.first['added_at'] as int?) ?? _now();
+    await _db.db.insert('books', {
+      'book_id': bookId,
+      'title': title,
+      'author': author,
+      'language': language,
+      'format': format,
+      'section_count': sectionCount,
+      'file_size': fileSize,
+      'fingerprint': fingerprint,
+      'added_at': addedAt,
+      'last_opened_at': _now(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   Future<BookRecord?> getBook(String bookId) async {
-    final rows = await _db.db
-        .query('books', where: 'book_id = ?', whereArgs: [bookId], limit: 1);
+    final rows = await _db.db.query(
+      'books',
+      where: 'book_id = ?',
+      whereArgs: [bookId],
+      limit: 1,
+    );
     if (rows.isEmpty) return null;
     return BookRecord.fromMap(rows.first);
   }
 
-  Future<List<BookRecord>> listBooks({String? query, String order = 'recent'}) async {
+  Future<BookRecord?> findByFingerprint(String fingerprint) async {
+    if (fingerprint.isEmpty) return null;
+    final rows = await _db.db.query(
+      'books',
+      where: 'fingerprint = ?',
+      whereArgs: [fingerprint],
+      orderBy: 'added_at ASC',
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return BookRecord.fromMap(rows.first);
+  }
+
+  Future<List<BookRecord>> listBooks({
+    String? query,
+    String order = 'recent',
+    bool onlyFavorites = false,
+  }) async {
     final orderBy = switch (order) {
-      'title' => 'title COLLATE NOCASE ASC',
-      'author' => 'author COLLATE NOCASE ASC, title COLLATE NOCASE ASC',
-      _ => 'last_opened_at DESC, added_at DESC',
+      'title' => 'b.title COLLATE NOCASE ASC',
+      'author' => 'b.author COLLATE NOCASE ASC, b.title COLLATE NOCASE ASC',
+      'added' => 'b.added_at DESC',
+      _ => 'b.last_opened_at DESC, b.added_at DESC',
     };
+    final favJoin = onlyFavorites
+        ? 'JOIN favorites f ON f.book_id = b.book_id'
+        : '';
     if (query == null || query.trim().isEmpty) {
-      final rows = await _db.db.query('books', orderBy: orderBy);
+      final rows = await _db.db.rawQuery(
+        'SELECT b.* FROM books b $favJoin ORDER BY $orderBy',
+      );
       return rows.map(BookRecord.fromMap).toList();
     }
-    final like = '%${query.trim()}%';
-    final rows = await _db.db.query('books',
-        where: 'title LIKE ? ESCAPE "\\" OR author LIKE ? ESCAPE "\\"',
-        whereArgs: [like, like],
-        orderBy: orderBy);
+    // Escape LIKE wildcards so a literal '%', '_' or '\' in the query
+    // cannot broaden the match (ESCAPE clause is already present).
+    final escaped = query
+        .trim()
+        .replaceAll('\\', '\\\\')
+        .replaceAll('%', '\\%')
+        .replaceAll('_', '\\_');
+    final like = '%$escaped%';
+    final rows = await _db.db.rawQuery(
+      'SELECT b.* FROM books b $favJoin '
+      'WHERE b.title LIKE ? ESCAPE "\\" OR b.author LIKE ? ESCAPE "\\" '
+      'ORDER BY $orderBy',
+      [like, like],
+    );
     return rows.map(BookRecord.fromMap).toList();
   }
 
   Future<List<BookRecord>> continueReading({int limit = 10}) async {
-    final rows = await _db.db.rawQuery('''
+    final rows = await _db.db.rawQuery(
+      '''
       SELECT b.* FROM books b
       JOIN reading_progress p ON p.book_id = b.book_id
       ORDER BY p.updated_at DESC LIMIT ?
-    ''', [limit]);
+    ''',
+      [limit],
+    );
     return rows.map(BookRecord.fromMap).toList();
   }
 
   Future<List<BookRecord>> recentlyRead({int limit = 10}) async {
-    final rows = await _db.db.query('books',
-        where: 'last_opened_at > 0',
-        orderBy: 'last_opened_at DESC',
-        limit: limit);
+    final rows = await _db.db.query(
+      'books',
+      where: 'last_opened_at > 0',
+      orderBy: 'last_opened_at DESC',
+      limit: limit,
+    );
+    return rows.map(BookRecord.fromMap).toList();
+  }
+
+  Future<List<BookRecord>> recentlyAdded({int limit = 10}) async {
+    final rows = await _db.db.query(
+      'books',
+      orderBy: 'added_at DESC',
+      limit: limit,
+    );
     return rows.map(BookRecord.fromMap).toList();
   }
 
   Future<void> touchOpened(String bookId) async {
-    await _db.db.update('books', {'last_opened_at': _now()},
-        where: 'book_id = ?', whereArgs: [bookId]);
+    await _db.db.update(
+      'books',
+      {'last_opened_at': _now()},
+      where: 'book_id = ?',
+      whereArgs: [bookId],
+    );
+  }
+
+  /// User-edited core fields. Stored in the DB only; the original
+  /// book file is never modified.
+  Future<void> updateBookFields(
+    String bookId, {
+    String? title,
+    String? author,
+    String? language,
+  }) async {
+    final patch = <String, Object?>{};
+    if (title != null) patch['title'] = title;
+    if (author != null) patch['author'] = author;
+    if (language != null) patch['language'] = language;
+    if (patch.isEmpty) return;
+    await _db.db.update(
+      'books',
+      patch,
+      where: 'book_id = ?',
+      whereArgs: [bookId],
+    );
+    await setMetadata(bookId, 'user_edited', '1');
   }
 
   Future<void> deleteBook(String bookId) async {
@@ -103,41 +180,44 @@ class BooksRepository {
     required String cachePath,
     required int size,
   }) async {
-    await _db.db.insert(
-      'book_files',
-      {
-        'book_id': bookId,
-        'kind': kind,
-        'display_name': displayName,
-        'mime': mime,
-        'mediastore_uri': mediastoreUri,
-        'cache_path': cachePath,
-        'size': size,
-      },
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    await _db.db.insert('book_files', {
+      'book_id': bookId,
+      'kind': kind,
+      'display_name': displayName,
+      'mime': mime,
+      'mediastore_uri': mediastoreUri,
+      'cache_path': cachePath,
+      'size': size,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   Future<FileRecord?> getFile(String bookId, String kind) async {
-    final rows = await _db.db.query('book_files',
-        where: 'book_id = ? AND kind = ?', whereArgs: [bookId, kind], limit: 1);
+    final rows = await _db.db.query(
+      'book_files',
+      where: 'book_id = ? AND kind = ?',
+      whereArgs: [bookId, kind],
+      limit: 1,
+    );
     if (rows.isEmpty) return null;
     return FileRecord.fromMap(rows.first);
   }
 
   Future<void> setMetadata(String bookId, String key, String value) async {
-    await _db.db.insert(
-      'book_metadata',
-      {'book_id': bookId, 'key': key, 'value': value},
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    await _db.db.insert('book_metadata', {
+      'book_id': bookId,
+      'key': key,
+      'value': value,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   Future<Map<String, String>> getMetadata(String bookId) async {
-    final rows = await _db.db.query('book_metadata',
-        where: 'book_id = ?', whereArgs: [bookId]);
+    final rows = await _db.db.query(
+      'book_metadata',
+      where: 'book_id = ?',
+      whereArgs: [bookId],
+    );
     return {
-      for (final r in rows) (r['key'] as String): (r['value'] as String?) ?? ''
+      for (final r in rows) (r['key'] as String): (r['value'] as String?) ?? '',
     };
   }
 
@@ -146,16 +226,23 @@ class BooksRepository {
     required String path,
     required String mime,
   }) async {
-    await _db.db.insert(
-      'covers',
-      {'book_id': bookId, 'path': path, 'mime': mime, 'width': 0, 'height': 0},
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    await _db.db.insert('covers', {
+      'book_id': bookId,
+      'path': path,
+      'mime': mime,
+      'width': 0,
+      'height': 0,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   Future<String?> coverPath(String bookId) async {
-    final rows = await _db.db.query('covers',
-        columns: ['path'], where: 'book_id = ?', whereArgs: [bookId], limit: 1);
+    final rows = await _db.db.query(
+      'covers',
+      columns: ['path'],
+      where: 'book_id = ?',
+      whereArgs: [bookId],
+      limit: 1,
+    );
     if (rows.isEmpty) return null;
     return rows.first['path'] as String?;
   }
@@ -172,23 +259,23 @@ class ProgressRepository {
     required int charOffset,
     required double progression,
   }) async {
-    await _db.db.insert(
-      'reading_progress',
-      {
-        'book_id': bookId,
-        'locator_json': locatorJson,
-        'section_index': sectionIndex,
-        'char_offset': charOffset,
-        'progression': progression,
-        'updated_at': _now(),
-      },
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    await _db.db.insert('reading_progress', {
+      'book_id': bookId,
+      'locator_json': locatorJson,
+      'section_index': sectionIndex,
+      'char_offset': charOffset,
+      'progression': progression,
+      'updated_at': _now(),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   Future<ProgressRecord?> loadProgress(String bookId) async {
-    final rows = await _db.db.query('reading_progress',
-        where: 'book_id = ?', whereArgs: [bookId], limit: 1);
+    final rows = await _db.db.query(
+      'reading_progress',
+      where: 'book_id = ?',
+      whereArgs: [bookId],
+      limit: 1,
+    );
     if (rows.isEmpty) return null;
     return ProgressRecord.fromMap(rows.first);
   }
@@ -215,8 +302,21 @@ class AnnotationsRepository {
   }
 
   Future<void> updateHighlightNote(int id, String note) async {
-    await _db.db.update('highlights', {'note': note, 'updated_at': _now()},
-        where: 'id = ?', whereArgs: [id]);
+    await _db.db.update(
+      'highlights',
+      {'note': note, 'updated_at': _now()},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  Future<void> updateHighlightColor(int id, int color) async {
+    await _db.db.update(
+      'highlights',
+      {'color': color, 'updated_at': _now()},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
   }
 
   Future<void> deleteHighlight(int id) async {
@@ -224,17 +324,25 @@ class AnnotationsRepository {
   }
 
   Future<List<HighlightRecord>> highlightsForSection(
-      String bookId, int sectionIndex) async {
-    final rows = await _db.db.query('highlights',
-        where: 'book_id = ? AND section_index = ?',
-        whereArgs: [bookId, sectionIndex],
-        orderBy: 'start_offset ASC');
+    String bookId,
+    int sectionIndex,
+  ) async {
+    final rows = await _db.db.query(
+      'highlights',
+      where: 'book_id = ? AND section_index = ?',
+      whereArgs: [bookId, sectionIndex],
+      orderBy: 'start_offset ASC',
+    );
     return rows.map(HighlightRecord.fromMap).toList();
   }
 
   Future<List<HighlightRecord>> allHighlights(String bookId) async {
-    final rows = await _db.db.query('highlights',
-        where: 'book_id = ?', whereArgs: [bookId], orderBy: 'created_at DESC');
+    final rows = await _db.db.query(
+      'highlights',
+      where: 'book_id = ?',
+      whereArgs: [bookId],
+      orderBy: 'created_at DESC',
+    );
     return rows.map(HighlightRecord.fromMap).toList();
   }
 
@@ -253,8 +361,12 @@ class AnnotationsRepository {
   }
 
   Future<void> updateNote(int id, String content) async {
-    await _db.db.update('notes', {'content': content, 'updated_at': _now()},
-        where: 'id = ?', whereArgs: [id]);
+    await _db.db.update(
+      'notes',
+      {'content': content, 'updated_at': _now()},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
   }
 
   Future<void> deleteNote(int id) async {
@@ -262,8 +374,12 @@ class AnnotationsRepository {
   }
 
   Future<List<NoteRecord>> allNotes(String bookId) async {
-    final rows = await _db.db.query('notes',
-        where: 'book_id = ?', whereArgs: [bookId], orderBy: 'created_at DESC');
+    final rows = await _db.db.query(
+      'notes',
+      where: 'book_id = ?',
+      whereArgs: [bookId],
+      orderBy: 'created_at DESC',
+    );
     return rows.map(NoteRecord.fromMap).toList();
   }
 
@@ -283,8 +399,12 @@ class AnnotationsRepository {
   }
 
   Future<List<BookmarkRecord>> allBookmarks(String bookId) async {
-    final rows = await _db.db.query('bookmarks',
-        where: 'book_id = ?', whereArgs: [bookId], orderBy: 'created_at DESC');
+    final rows = await _db.db.query(
+      'bookmarks',
+      where: 'book_id = ?',
+      whereArgs: [bookId],
+      orderBy: 'created_at DESC',
+    );
     return rows.map(BookmarkRecord.fromMap).toList();
   }
 }
@@ -294,21 +414,28 @@ class LibraryRepository {
   final CodarDatabase _db;
 
   Future<bool> isFavorite(String bookId) async {
-    final rows = await _db.db.query('favorites',
-        columns: ['book_id'], where: 'book_id = ?', whereArgs: [bookId], limit: 1);
+    final rows = await _db.db.query(
+      'favorites',
+      columns: ['book_id'],
+      where: 'book_id = ?',
+      whereArgs: [bookId],
+      limit: 1,
+    );
     return rows.isNotEmpty;
   }
 
   Future<void> setFavorite(String bookId, bool favorite) async {
     if (favorite) {
-      await _db.db.insert(
-        'favorites',
-        {'book_id': bookId, 'created_at': _now()},
-        conflictAlgorithm: ConflictAlgorithm.ignore,
-      );
+      await _db.db.insert('favorites', {
+        'book_id': bookId,
+        'created_at': _now(),
+      }, conflictAlgorithm: ConflictAlgorithm.ignore);
     } else {
-      await _db.db
-          .delete('favorites', where: 'book_id = ?', whereArgs: [bookId]);
+      await _db.db.delete(
+        'favorites',
+        where: 'book_id = ?',
+        whereArgs: [bookId],
+      );
     }
   }
 
@@ -321,11 +448,10 @@ class LibraryRepository {
   }
 
   Future<int> createCollection(String name) async {
-    return _db.db.insert(
-      'collections',
-      {'name': name.trim(), 'created_at': _now()},
-      conflictAlgorithm: ConflictAlgorithm.ignore,
-    );
+    return _db.db.insert('collections', {
+      'name': name.trim(),
+      'created_at': _now(),
+    }, conflictAlgorithm: ConflictAlgorithm.ignore);
   }
 
   Future<void> deleteCollection(int id) async {
@@ -333,32 +459,49 @@ class LibraryRepository {
   }
 
   Future<List<CollectionRecord>> collections() async {
-    final rows =
-        await _db.db.query('collections', orderBy: 'created_at ASC');
+    final rows = await _db.db.query('collections', orderBy: 'created_at ASC');
     return rows.map(CollectionRecord.fromMap).toList();
   }
 
+  Future<Set<int>> collectionIdsForBook(String bookId) async {
+    final rows = await _db.db.query(
+      'collection_books',
+      columns: ['collection_id'],
+      where: 'book_id = ?',
+      whereArgs: [bookId],
+    );
+    return {for (final r in rows) (r['collection_id'] as int?) ?? -1}
+      ..remove(-1);
+  }
+
   Future<void> setBookInCollection(
-      int collectionId, String bookId, bool member) async {
+    int collectionId,
+    String bookId,
+    bool member,
+  ) async {
     if (member) {
-      await _db.db.insert(
-        'collection_books',
-        {'collection_id': collectionId, 'book_id': bookId},
-        conflictAlgorithm: ConflictAlgorithm.ignore,
-      );
+      await _db.db.insert('collection_books', {
+        'collection_id': collectionId,
+        'book_id': bookId,
+      }, conflictAlgorithm: ConflictAlgorithm.ignore);
     } else {
-      await _db.db.delete('collection_books',
-          where: 'collection_id = ? AND book_id = ?',
-          whereArgs: [collectionId, bookId]);
+      await _db.db.delete(
+        'collection_books',
+        where: 'collection_id = ? AND book_id = ?',
+        whereArgs: [collectionId, bookId],
+      );
     }
   }
 
   Future<List<BookRecord>> collectionBooks(int collectionId) async {
-    final rows = await _db.db.rawQuery('''
+    final rows = await _db.db.rawQuery(
+      '''
       SELECT b.* FROM books b
       JOIN collection_books cb ON cb.book_id = b.book_id
       WHERE cb.collection_id = ? ORDER BY b.title COLLATE NOCASE ASC
-    ''', [collectionId]);
+    ''',
+      [collectionId],
+    );
     return rows.map(BookRecord.fromMap).toList();
   }
 }
@@ -368,27 +511,40 @@ class SettingsRepository {
   final CodarDatabase _db;
 
   Future<ReaderSettingsData> readerSettings() async {
-    final rows =
-        await _db.db.query('reader_settings', where: 'id = 1', limit: 1);
+    final rows = await _db.db.query(
+      'reader_settings',
+      where: 'id = 1',
+      limit: 1,
+    );
     if (rows.isEmpty) return ReaderSettingsData.fromMap({});
     return ReaderSettingsData.fromMap(rows.first);
   }
 
   Future<void> saveReaderSettings(ReaderSettingsData s) async {
     final map = s.toMap()..['id'] = 1;
-    await _db.db.insert('reader_settings', map,
-        conflictAlgorithm: ConflictAlgorithm.replace);
+    await _db.db.insert(
+      'reader_settings',
+      map,
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
   }
 
   Future<String> appValue(String key, String fallback) async {
-    final rows = await _db.db.query('app_settings',
-        columns: ['value'], where: 'key = ?', whereArgs: [key], limit: 1);
+    final rows = await _db.db.query(
+      'app_settings',
+      columns: ['value'],
+      where: 'key = ?',
+      whereArgs: [key],
+      limit: 1,
+    );
     if (rows.isEmpty) return fallback;
     return (rows.first['value'] as String?) ?? fallback;
   }
 
   Future<void> setAppValue(String key, String value) async {
-    await _db.db.insert('app_settings', {'key': key, 'value': value},
-        conflictAlgorithm: ConflictAlgorithm.replace);
+    await _db.db.insert('app_settings', {
+      'key': key,
+      'value': value,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 }

@@ -1,6 +1,6 @@
 // The Android Gradle Plugin builds the native code with the Android NDK.
 
-group 'com.flutter_rust_bridge.rust_lib_codar'
+group 'com.codar.rust_lib_codar'
 version '1.0'
 
 buildscript {
@@ -26,7 +26,7 @@ apply plugin: 'com.android.library'
 
 android {
     if (project.android.hasProperty("namespace")) {
-        namespace 'com.flutter_rust_bridge.rust_lib_codar'
+        namespace 'com.codar.rust_lib_codar'
     }
 
     // Bumping the plugin compileSdkVersion requires all clients of this plugin
@@ -45,12 +45,14 @@ android {
     }
 
     defaultConfig {
-        minSdkVersion 19
+        minSdkVersion 24
     }
 }
 
 apply from: "../cargokit/gradle/plugin.gradle"
 cargokit {
     manifestDir = "../../rust"
-    libname = "rust_lib_codar"
+    // Keep the builder/task name aligned with rust/Cargo.toml and FRB's
+    // generated loader stem. The Flutter plugin package remains rust_lib_codar.
+    libname = "codar_reader"
 }

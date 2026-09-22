@@ -1,5 +1,12 @@
 # Codar — Third-Party Licenses (Phase 1)
 
+Phase 4 re-verification (2026-09-17): no dependency added/changed since
+Phase 1 — `pubspec.yaml` gained only `assets/brand/` entries, lockfiles
+untouched. `cargo deny check licenses` → **ok**; `cargo deny check
+advisories` → only the known RUSTSEC-2026-0192 (`ttf-parser`
+unmaintained, watch item below, no safe upgrade) — no new findings.
+
+
 Generated/audited: 2026-09-16. Toolchain: Flutter 3.47.1 / Dart 3.13.1 /
 Rust 1.98.1 / cargo-deny 0.20.2 (`cargo deny check licenses` → **ok**).
 

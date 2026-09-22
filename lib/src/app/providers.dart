@@ -3,7 +3,10 @@
 import 'package:codar/src/db/database.dart';
 import 'package:codar/src/db/models.dart';
 import 'package:codar/src/db/repositories.dart';
+import 'package:codar/src/library/backup_service.dart';
+import 'package:codar/src/library/enrichment_service.dart';
 import 'package:codar/src/library/import_service.dart';
+import 'package:codar/src/library/reconcile_service.dart';
 import 'package:codar/src/reader/reader_service.dart';
 import 'package:codar/src/storage/codar_lib.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -54,6 +57,30 @@ final importServiceProvider = Provider<ImportService>((ref) {
   );
 });
 
+final enrichmentServiceProvider = Provider<EnrichmentService>((ref) {
+  return EnrichmentService(books: ref.watch(booksRepoProvider));
+});
+
+final backupServiceProvider = Provider<BackupService>((ref) {
+  final db = ref.watch(databaseProvider).requireValue;
+  return BackupService(db);
+});
+
+/// One-shot silent reconcile of externally deleted CodarLib files.
+/// Watched by Home/Library so it runs once per launch; failures are
+/// swallowed (never block the UI, never purge on uncertain data).
+final reconcileProvider = FutureProvider<int>((ref) async {
+  final db = await ref.watch(databaseProvider.future);
+  final books = BooksRepository(db);
+  final reader = ref.watch(readerServiceProvider);
+  final import = ImportService(
+      reader: reader, books: books, storage: CodarLibStorage());
+  final purged = await reconcileExternalDeletions(
+      books: books, import: import, storage: CodarLibStorage());
+  if (purged > 0) ref.read(libraryRefreshProvider.notifier).bump();
+  return purged;
+});
+
 /// Active locale code ('tr' default). Persisted in app_settings.
 class LocaleNotifier extends Notifier<String> {
   @override
@@ -78,16 +105,23 @@ final readerSettingsProvider =
 
 /// Library list state.
 class LibraryQuery {
-  const LibraryQuery({this.text = '', this.order = 'recent', this.grid = true});
+  const LibraryQuery(
+      {this.text = '',
+      this.order = 'recent',
+      this.grid = true,
+      this.onlyFavorites = false});
   final String text;
   final String order;
   final bool grid;
+  final bool onlyFavorites;
 
-  LibraryQuery copyWith({String? text, String? order, bool? grid}) =>
+  LibraryQuery copyWith(
+          {String? text, String? order, bool? grid, bool? onlyFavorites}) =>
       LibraryQuery(
         text: text ?? this.text,
         order: order ?? this.order,
         grid: grid ?? this.grid,
+        onlyFavorites: onlyFavorites ?? this.onlyFavorites,
       );
 }
 
@@ -106,7 +140,8 @@ final booksListProvider = FutureProvider<List<BookRecord>>((ref) async {
   ref.watch(libraryRefreshProvider);
   final q = ref.watch(libraryQueryProvider);
   final repo = ref.watch(booksRepoProvider);
-  return repo.listBooks(query: q.text, order: q.order);
+  return repo.listBooks(
+      query: q.text, order: q.order, onlyFavorites: q.onlyFavorites);
 });
 
 /// Bump to refresh library lists after import/delete/favorite changes.

@@ -1,4 +1,4 @@
-// Codar local database: full Phase 2 schema (12 tables).
+// Codar local database: full Phase 2 schema (13 tables).
 //
 // Private data lives ONLY here (app documents dir). Downloads/CodarLib/
 // contains book files and nothing else. Original book files are never
@@ -13,14 +13,18 @@ class CodarDatabase {
   final Database db;
 
   static const _name = 'codar.db';
-  static const version = 1;
+  // Version 1 is the original 13-table baseline. Version 2 keeps that
+  // baseline intact while establishing the explicit migration pipeline.
+  static const version = 2;
 
   static Future<CodarDatabase> open({String? pathOverride}) async {
     final dir = await getApplicationDocumentsDirectory();
     final path = pathOverride ?? p.join(dir.path, _name);
-    final db = await openDatabase(path, version: version,
-        onCreate: (db, _) async {
-      await db.execute('''
+    final db = await openDatabase(
+      path,
+      version: version,
+      onCreate: (db, _) async {
+        await db.execute('''
         CREATE TABLE books(
           book_id TEXT PRIMARY KEY,
           title TEXT NOT NULL,
@@ -33,7 +37,7 @@ class CodarDatabase {
           added_at INTEGER NOT NULL,
           last_opened_at INTEGER NOT NULL DEFAULT 0
         )''');
-      await db.execute('''
+        await db.execute('''
         CREATE TABLE book_files(
           book_id TEXT NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
           kind TEXT NOT NULL,
@@ -44,14 +48,14 @@ class CodarDatabase {
           size INTEGER NOT NULL DEFAULT 0,
           PRIMARY KEY (book_id, kind)
         )''');
-      await db.execute('''
+        await db.execute('''
         CREATE TABLE book_metadata(
           book_id TEXT NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
           key TEXT NOT NULL,
           value TEXT NOT NULL DEFAULT '',
           PRIMARY KEY (book_id, key)
         )''');
-      await db.execute('''
+        await db.execute('''
         CREATE TABLE reading_progress(
           book_id TEXT PRIMARY KEY REFERENCES books(book_id) ON DELETE CASCADE,
           locator_json TEXT NOT NULL,
@@ -60,7 +64,7 @@ class CodarDatabase {
           progression REAL NOT NULL DEFAULT 0,
           updated_at INTEGER NOT NULL
         )''');
-      await db.execute('''
+        await db.execute('''
         CREATE TABLE highlights(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           book_id TEXT NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
@@ -74,7 +78,7 @@ class CodarDatabase {
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL
         )''');
-      await db.execute('''
+        await db.execute('''
         CREATE TABLE notes(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           book_id TEXT NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
@@ -86,7 +90,7 @@ class CodarDatabase {
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL
         )''');
-      await db.execute('''
+        await db.execute('''
         CREATE TABLE bookmarks(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           book_id TEXT NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
@@ -96,24 +100,24 @@ class CodarDatabase {
           label TEXT NOT NULL DEFAULT '',
           created_at INTEGER NOT NULL
         )''');
-      await db.execute('''
+        await db.execute('''
         CREATE TABLE favorites(
           book_id TEXT PRIMARY KEY REFERENCES books(book_id) ON DELETE CASCADE,
           created_at INTEGER NOT NULL
         )''');
-      await db.execute('''
+        await db.execute('''
         CREATE TABLE collections(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           name TEXT NOT NULL UNIQUE,
           created_at INTEGER NOT NULL
         )''');
-      await db.execute('''
+        await db.execute('''
         CREATE TABLE collection_books(
           collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
           book_id TEXT NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
           PRIMARY KEY (collection_id, book_id)
         )''');
-      await db.execute('''
+        await db.execute('''
         CREATE TABLE covers(
           book_id TEXT PRIMARY KEY REFERENCES books(book_id) ON DELETE CASCADE,
           path TEXT NOT NULL,
@@ -121,7 +125,7 @@ class CodarDatabase {
           width INTEGER NOT NULL DEFAULT 0,
           height INTEGER NOT NULL DEFAULT 0
         )''');
-      await db.execute('''
+        await db.execute('''
         CREATE TABLE reader_settings(
           id INTEGER PRIMARY KEY CHECK (id = 1),
           font_family TEXT NOT NULL DEFAULT 'System',
@@ -131,17 +135,44 @@ class CodarDatabase {
           alignment TEXT NOT NULL DEFAULT 'start',
           theme TEXT NOT NULL DEFAULT 'light'
         )''');
-      await db.execute('''
+        await db.execute('''
         CREATE TABLE app_settings(
           key TEXT PRIMARY KEY,
           value TEXT NOT NULL DEFAULT ''
         )''');
-      await db.insert('reader_settings', {'id': 1});
-      await db.insert('app_settings', {'key': 'locale', 'value': 'tr'});
-    }, onConfigure: (db) async {
-      await db.execute('PRAGMA foreign_keys = ON');
-    });
+        await db.insert('reader_settings', {'id': 1});
+        await db.insert('app_settings', {'key': 'locale', 'value': 'tr'});
+      },
+      onUpgrade: _onUpgrade,
+      onConfigure: (db) async {
+        await db.execute('PRAGMA foreign_keys = ON');
+      },
+    );
     return CodarDatabase._(db);
+  }
+
+  static Future<void> _onUpgrade(
+    Database db,
+    int oldVersion,
+    int newVersion,
+  ) async {
+    for (
+      var targetVersion = oldVersion + 1;
+      targetVersion <= newVersion;
+      targetVersion++
+    ) {
+      switch (targetVersion) {
+        case 2:
+          // The v1 database already contains all 13 baseline tables. Keep
+          // this migration intentionally empty so existing user data is not
+          // rewritten or dropped; future schema changes get a new case.
+          break;
+        default:
+          throw StateError(
+            'Unsupported Codar database migration: $targetVersion',
+          );
+      }
+    }
   }
 
   Future<void> close() => db.close();

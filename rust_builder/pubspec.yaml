@@ -1,5 +1,5 @@
 name: rust_lib_codar
-description: "Utility to build Rust code"
+description: "Codar Reader Core Rust bridge build helper."
 version: 0.0.1
 publish_to: none
 

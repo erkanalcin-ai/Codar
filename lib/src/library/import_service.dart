@@ -1,13 +1,20 @@
-// Product import flow: SAF picker -> validate -> Downloads/CodarLib/.
+// Product import flow: SAF picker -> validate -> move into CodarLib.
 //
-// Rules: originals are never modified; only book files land in CodarLib;
-// DB/covers/cache stay app-private. Every import is proven openable by the
-// engine before it is accepted.
+// A picked source is never moved until Reader Core proves it is openable.
+// Invalid/unopenable sources therefore remain where the user selected them;
+// successful local imports leave one physical book file in CodarLib.
 
 import 'dart:io';
 import 'dart:typed_data';
 
+// file_picker's Android implementation is already pinned transitively by
+// file_picker. Its public SAF types are required to request write access and
+// recover the original content URI instead of the plugin's temporary cache
+// path.
+// ignore: depend_on_referenced_packages
+import 'package:android_file_picker/android_file_picker.dart' as android;
 import 'package:codar/src/db/repositories.dart';
+import 'package:codar/src/library/book_id.dart';
 import 'package:codar/src/reader/reader_service.dart';
 import 'package:codar/src/storage/codar_lib.dart';
 import 'package:file_picker/file_picker.dart';
@@ -32,7 +39,11 @@ const _allowedExtensions = {
 const maxImportBytes = 200 * 1024 * 1024;
 
 class ImportResult {
-  ImportResult({required this.bookId, required this.title, required this.isNew});
+  ImportResult({
+    required this.bookId,
+    required this.title,
+    required this.isNew,
+  });
   final String bookId;
   final String title;
   final bool isNew;
@@ -49,22 +60,86 @@ class ImportService {
   final BooksRepository books;
   final CodarLibStorage storage;
 
+  // Serializes imports: two rapid picks of the same file must not both
+  // pass the duplicate check and create two MediaStore entries.
+  Future<void> _tail = Future.value();
+
   /// Interactive import: opens the system picker (SAF on Android).
   /// Returns null when the user cancels.
   Future<ImportResult?> importWithPicker() async {
     final picked = await FilePicker.pickFile(
       type: FileType.custom,
       allowedExtensions: _allowedExtensions.keys.toList(),
+      androidOptions: const android.FilePickerAndroidOptions(
+        safOptions: android.AndroidSAFOptions(
+          accessMode: android.AndroidSAFAccessMode.readWrite,
+          grant: android.AndroidSAFGrant.lifetime,
+          persistGrant: true,
+        ),
+      ),
     );
     if (picked == null) return null;
-    final bytes = await picked.readAsBytes();
-    return importBytes(displayName: picked.name, bytes: bytes);
+    final androidPicked = picked is android.AndroidPlatformFile ? picked : null;
+    final sourceUri = androidPicked?.safHandle?.uri.toString();
+    final pickerCachePath = androidPicked?.path;
+    try {
+      // Size gate BEFORE reading bytes: readAsBytes materializes the whole
+      // file in RAM, so an oversized pick must be rejected up front.
+      final pickedSize = await picked.length();
+      if (pickedSize > maxImportBytes) {
+        throw ImportException('bad-size');
+      }
+      if (sourceUri == null || sourceUri.isEmpty) {
+        // Moving a picker cache path would leave the real Downloads file in
+        // place and violate the single-physical-file contract.
+        throw ImportException('source-unavailable');
+      }
+      final bytes = await picked.readAsBytes();
+      return await importBytes(
+        displayName: picked.name,
+        bytes: bytes,
+        sourceUri: sourceUri,
+        validationPath: pickerCachePath,
+      );
+    } finally {
+      // file_picker materializes an app-private cache copy for SAF files.
+      // It is only a validation bridge and must not remain as a second book.
+      if (pickerCachePath != null) {
+        final cache = File(pickerCachePath);
+        try {
+          if (await cache.exists()) await cache.delete();
+        } catch (_) {}
+      }
+      try {
+        await androidPicked?.safHandle?.releaseGrant();
+      } catch (_) {}
+    }
   }
 
   /// Non-interactive import of known bytes (used by tests/seeding).
   Future<ImportResult> importBytes({
     required String displayName,
     required List<int> bytes,
+    String? sourceUri,
+    String? validationPath,
+  }) async {
+    final next = _tail.then(
+      (_) => _importBytesInner(
+        displayName,
+        bytes,
+        sourceUri: sourceUri,
+        validationPath: validationPath,
+      ),
+    );
+    _tail = next.then((_) {}, onError: (_) {});
+    return next;
+  }
+
+  Future<ImportResult> _importBytesInner(
+    String displayName,
+    List<int> bytes, {
+    String? sourceUri,
+    String? validationPath,
   }) async {
     final ext = p.extension(displayName).replaceFirst('.', '').toLowerCase();
     final mime = _allowedExtensions[ext];
@@ -77,8 +152,15 @@ class ImportService {
 
     // Prove the engine can actually open it before accepting.
     final probeDir = await getTemporaryDirectory();
-    final probe = File(p.join(probeDir.path,
-        'codar_probe_${DateTime.now().microsecondsSinceEpoch}.$ext'));
+    final probe = validationPath == null
+        ? File(
+            p.join(
+              probeDir.path,
+              'codar_probe_${DateTime.now().microsecondsSinceEpoch}.$ext',
+            ),
+          )
+        : File(validationPath);
+    final ownsProbe = validationPath == null;
     late final String bookId;
     late String title;
     late final String author;
@@ -87,7 +169,8 @@ class ImportService {
     late final int sectionCount;
     late final String fingerprint;
     try {
-      await probe.writeAsBytes(bytes, flush: true);
+      if (ownsProbe) await probe.writeAsBytes(bytes, flush: true);
+      if (!await probe.exists()) throw ImportException('source-unavailable');
       await reader.withBook(probe.path, (s) async {
         final info = await reader.getDocumentInfo(s);
         title = _clean(info.title);
@@ -97,23 +180,42 @@ class ImportService {
         sectionCount = info.sectionCount.toInt();
         fingerprint = info.fingerprint;
         if (title.isEmpty) title = p.basenameWithoutExtension(displayName);
-        bookId = fingerprint.isNotEmpty
-            ? 'fp_${fingerprint.hashCode.toUnsigned(20).toRadixString(16)}'
-            : 'f_${displayName.hashCode.toUnsigned(20).toRadixString(16)}_${bytes.length}';
+        bookId = stableBookId(bytes);
       });
     } finally {
-      if (await probe.exists()) await probe.delete();
+      if (ownsProbe && await probe.exists()) await probe.delete();
     }
 
-    final existing = await books.getBook(bookId);
+    // Reuse a legacy row when it was created by the pre-stable-ID build.
+    // This preserves its annotations/progress without recreating the book.
+    final existing =
+        await books.getBook(bookId) ??
+        await books.findByFingerprint(fingerprint);
     if (existing != null) {
-      await books.touchOpened(bookId);
-      return ImportResult(bookId: bookId, title: existing.title, isNew: false);
+      await books.touchOpened(existing.bookId);
+      return ImportResult(
+        bookId: existing.bookId,
+        title: existing.title,
+        isNew: false,
+      );
     }
 
-    // Canonical user-visible copy.
-    final uri = await storage.importFile(
-        name: displayName, bytes: Uint8List.fromList(bytes), mime: mime);
+    // A picker import is a move: Reader Core has already proven the source
+    // openable, and native storage removes the source only after the
+    // CodarLib stream completes successfully. Byte imports remain available
+    // for bundled fixtures/tests and use the existing copy path.
+    final uri = sourceUri == null
+        ? await storage.importFile(
+            name: displayName,
+            bytes: Uint8List.fromList(bytes),
+            mime: mime,
+          )
+        : await storage.movePickedFile(
+            name: displayName,
+            mime: mime,
+            sourceUri: sourceUri,
+            size: bytes.length,
+          );
 
     await books.upsertBook(
       bookId: bookId,
@@ -151,8 +253,7 @@ class ImportService {
         final dir = await getApplicationSupportDirectory();
         final dirPath = p.join(dir.path, 'covers');
         await Directory(dirPath).create(recursive: true);
-        final out =
-            File(p.join(dirPath, '$bookId.cover'));
+        final out = File(p.join(dirPath, '$bookId.cover'));
         await out.writeAsBytes(cover.data, flush: true);
         await books.saveCover(bookId: bookId, path: out.path, mime: cover.mime);
       });
@@ -179,12 +280,18 @@ class ImportService {
     return staged.path;
   }
 
-  Future<void> deleteBook(String bookId) async {
-    final file = await books.getFile(bookId, 'original');
-    if (file != null && file.mediastoreUri.isNotEmpty) {
-      try {
-        await storage.deleteFile(file.mediastoreUri);
-      } catch (_) {}
+  /// Deletes the library entry. When [deleteFile] is true (user default,
+  /// see Settings) the Downloads/CodarLib/ copy is removed as well;
+  /// otherwise only the DB row + app-private staged copy/cover are purged
+  /// (used when the file is already gone, or the user chose to keep it).
+  Future<void> deleteBook(String bookId, {bool deleteFile = true}) async {
+    if (deleteFile) {
+      final file = await books.getFile(bookId, 'original');
+      if (file != null && file.mediastoreUri.isNotEmpty) {
+        try {
+          await storage.deleteFile(file.mediastoreUri);
+        } catch (_) {}
+      }
     }
     final dir = await getApplicationSupportDirectory();
     final bookDir = Directory(p.join(dir.path, 'books', bookId));

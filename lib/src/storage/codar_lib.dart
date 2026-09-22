@@ -1,4 +1,4 @@
-// Phase 1 storage spike: MediaStore-backed Downloads/CodarLib/ access.
+// MediaStore-backed Downloads/CodarLib/ access.
 // No MANAGE_EXTERNAL_STORAGE. Only the app's own entries are visible.
 
 import 'package:flutter/services.dart';
@@ -26,6 +26,27 @@ class CodarLibStorage {
     return uri;
   }
 
+  /// Moves a user-selected local file into CodarLib.
+  ///
+  /// The Android side streams from the original SAF/file URI into the
+  /// CodarLib destination and deletes the source only after the stream has
+  /// completed and its size matches. This avoids a persistent duplicate.
+  Future<String> movePickedFile({
+    required String name,
+    required String mime,
+    required String sourceUri,
+    required int size,
+  }) async {
+    final uri = await _ch.invokeMethod<String>('movePickedFile', {
+      'name': name,
+      'mime': mime,
+      'sourceUri': sourceUri,
+      'size': size,
+    });
+    if (uri == null) throw StateError('movePickedFile returned null');
+    return uri;
+  }
+
   Future<Uint8List> readFile(String uri) async {
     final bytes = await _ch.invokeMethod<Uint8List>('readFile', {'uri': uri});
     if (bytes == null) throw StateError('readFile returned null');
@@ -37,10 +58,10 @@ class CodarLibStorage {
     if (raw == null) return [];
     return raw
         .cast<Map<dynamic, dynamic>>()
-        .map((m) => CodarLibFile(
-              name: m['name'] as String,
-              uri: m['uri'] as String,
-            ))
+        .map(
+          (m) =>
+              CodarLibFile(name: m['name'] as String, uri: m['uri'] as String),
+        )
         .toList();
   }
 

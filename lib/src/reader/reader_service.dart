@@ -26,7 +26,15 @@ class CodarReaderService with ChangeNotifier {
   final Set<BigInt> _open = {};
 
   Future<void> init() async {
-    await RustLib.init();
+    if (_ready) return;
+    try {
+      await RustLib.init();
+    } on StateError catch (e) {
+      // FRB permits a single init per process. A second scope in the same
+      // process (hot restart, embedded tests) finds an already-live bridge,
+      // which is a ready bridge — not an error.
+      if (!e.message.contains('twice')) rethrow;
+    }
     _ready = true;
     notifyListeners();
   }
