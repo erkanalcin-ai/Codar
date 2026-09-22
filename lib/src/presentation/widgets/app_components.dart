@@ -28,8 +28,8 @@ class ProgressIndicatorLine extends StatelessWidget {
 }
 
 class BookCard extends ConsumerWidget {
-  const BookCard({super.key, required this.book, this.variant = BookCardVariant.grid, this.onTap});
-  final BookRecord book; final BookCardVariant variant; final VoidCallback? onTap;
+  const BookCard({super.key, required this.book, this.variant = BookCardVariant.grid, this.onTap, this.progress});
+  final BookRecord book; final BookCardVariant variant; final VoidCallback? onTap; final double? progress;
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final action = onTap ?? () => context.push('/book/${Uri.encodeComponent(book.bookId)}');
@@ -39,7 +39,12 @@ class BookCard extends ConsumerWidget {
     }));
   }
   Widget _grid(BuildContext c) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: BookCover(book: book, width: double.infinity, height: double.infinity)), const SizedBox(height: 8), Text(book.title.isEmpty ? '—' : book.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(c).textTheme.titleSmall), if (book.author.isNotEmpty) Text(book.author, maxLines: 1, overflow: TextOverflow.ellipsis, style: Theme.of(c).textTheme.bodySmall)]);
-  Widget _horizontal(BuildContext c) => Row(children: [BookCover(book: book, width: 86, height: 124), const SizedBox(width: 14), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [Text(book.title.isEmpty ? '—' : book.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(c).textTheme.titleMedium), if (book.author.isNotEmpty) Text(book.author, style: Theme.of(c).textTheme.bodyMedium), const SizedBox(height: 14), const ProgressIndicatorLine(value: .42)]))]);
+  Widget _horizontal(BuildContext c) {
+    final safeProgress = progress == null || !progress!.isFinite
+        ? 0.0
+        : progress!.clamp(0.0, 1.0).toDouble();
+    return Row(children: [BookCover(book: book, width: 86, height: 124), const SizedBox(width: 14), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [Text(book.title.isEmpty ? '—' : book.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(c).textTheme.titleMedium), if (book.author.isNotEmpty) Text(book.author, style: Theme.of(c).textTheme.bodyMedium), if (progress != null) ...[const SizedBox(height: 14), ProgressIndicatorLine(value: safeProgress)] ]))]);
+  }
 }
 
 enum BookCardVariant { horizontal, grid }

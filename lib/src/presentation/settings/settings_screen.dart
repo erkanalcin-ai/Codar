@@ -8,6 +8,11 @@ import 'package:codar/src/library/backup_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+final _privacyPolicyUri = Uri.parse(
+  'https://erkanalcin-ai.github.io/Codar/privacy.html',
+);
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -204,6 +209,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                               ),
                             ],
                           ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    _SettingsGroup(
+                      title: tr(locale, 'privacyPolicy'),
+                      children: [
+                        ListTile(
+                          leading: const Icon(
+                            Icons.privacy_tip_outlined,
+                            color: CodarColors.gold,
+                          ),
+                          title: Text(tr(locale, 'privacyPolicy')),
+                          trailing: const Icon(Icons.chevron_right_rounded),
+                          onTap: () => _openPrivacyPolicy(locale),
                         ),
                       ],
                     ),
@@ -421,6 +441,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       );
     } finally {
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _openPrivacyPolicy(String locale) async {
+    final opened = await launchUrl(
+      _privacyPolicyUri,
+      mode: LaunchMode.externalApplication,
+    );
+    if (!opened && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(tr(locale, 'privacyPolicyOpenFailed'))),
+      );
     }
   }
 }

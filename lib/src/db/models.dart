@@ -39,6 +39,33 @@ class BookRecord {
       );
 }
 
+/// A library list item with its optional, already-joined reading progress.
+/// This keeps progress out of the books table model while avoiding per-book
+/// progress queries in the Library UI.
+class LibraryBookRecord {
+  const LibraryBookRecord({required this.book, required this.progress});
+
+  final BookRecord book;
+  final ProgressRecord? progress;
+
+  factory LibraryBookRecord.fromMap(Map<String, Object?> m) {
+    final hasProgress = m['progress_locator_json'] != null;
+    return LibraryBookRecord(
+      book: BookRecord.fromMap(m),
+      progress: hasProgress
+          ? ProgressRecord.fromMap({
+              'book_id': m['book_id'],
+              'locator_json': m['progress_locator_json'],
+              'section_index': m['progress_section_index'],
+              'char_offset': m['progress_char_offset'],
+              'progression': m['progress_progression'],
+              'updated_at': m['progress_updated_at'],
+            })
+          : null,
+    );
+  }
+}
+
 class FileRecord {
   FileRecord({
     required this.displayName,

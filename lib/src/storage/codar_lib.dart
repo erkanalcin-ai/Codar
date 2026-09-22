@@ -9,6 +9,22 @@ class CodarLibFile {
   final String uri;
 }
 
+class CodarTreeFile {
+  CodarTreeFile({required this.name, required this.uri, required this.size});
+
+  factory CodarTreeFile.fromMap(Map<dynamic, dynamic> map) {
+    return CodarTreeFile(
+      name: map['name'] as String? ?? '',
+      uri: map['uri'] as String? ?? '',
+      size: (map['size'] as num?)?.toInt() ?? -1,
+    );
+  }
+
+  final String name;
+  final String uri;
+  final int size;
+}
+
 class CodarLibStorage {
   static const MethodChannel _ch = MethodChannel('codar/storage');
 
@@ -62,6 +78,17 @@ class CodarLibStorage {
           (m) =>
               CodarLibFile(name: m['name'] as String, uri: m['uri'] as String),
         )
+        .toList();
+  }
+
+  Future<List<CodarTreeFile>> listTreeFiles(String treeUri) async {
+    final raw = await _ch.invokeMethod<List<dynamic>>('listTreeFiles', {
+      'treeUri': treeUri,
+    });
+    if (raw == null) return [];
+    return raw
+        .cast<Map<dynamic, dynamic>>()
+        .map(CodarTreeFile.fromMap)
         .toList();
   }
 

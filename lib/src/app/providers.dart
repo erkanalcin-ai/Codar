@@ -144,6 +144,17 @@ final booksListProvider = FutureProvider<List<BookRecord>>((ref) async {
       query: q.text, order: q.order, onlyFavorites: q.onlyFavorites);
 });
 
+final libraryBooksProvider = FutureProvider<List<LibraryBookRecord>>((ref) async {
+  ref.watch(libraryRefreshProvider);
+  final q = ref.watch(libraryQueryProvider);
+  final repo = ref.watch(booksRepoProvider);
+  return repo.listLibraryBooks(
+    query: q.text,
+    order: q.order,
+    onlyFavorites: q.onlyFavorites,
+  );
+});
+
 /// Bump to refresh library lists after import/delete/favorite changes.
 class LibraryRefreshNotifier extends Notifier<int> {
   @override

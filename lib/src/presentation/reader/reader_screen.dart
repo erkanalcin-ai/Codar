@@ -199,9 +199,9 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
               saved.locatorJson,
             );
             start = restored.sectionIndex.toInt();
-            startProgression = saved.progression.isFinite
-                ? saved.progression.clamp(0.0, 1.0).toDouble()
-                : null;
+            // SQLite progression is book-wide. The page picker expects a
+            // section-local ratio, so restore the exact local offset instead.
+            startProgression = null;
             keepSavedLocator = true;
           } catch (_) {
             // Fall through to the saved section and character offset.
@@ -524,7 +524,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
             locatorJson: p.locatorJson,
             sectionIndex: section,
             charOffset: offset,
-            progression: p.progression,
+            progression: p.totalProgression,
           );
     } catch (_) {
       // Progress is best-effort per navigation; the book stays readable.

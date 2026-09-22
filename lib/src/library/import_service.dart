@@ -1,8 +1,10 @@
-// Product import flow: SAF picker -> validate -> move into CodarLib.
+// Product import flow: SAF picker/folder -> validate -> CodarLib.
 //
 // A picked source is never moved until Reader Core proves it is openable.
 // Invalid/unopenable sources therefore remain where the user selected them;
-// successful local imports leave one physical book file in CodarLib.
+// successful file-picker imports leave one physical book file in CodarLib.
+// Folder imports intentionally use the byte-copy path so selected originals
+// remain in place.
 
 import 'dart:io';
 import 'dart:typed_data';
@@ -49,6 +51,50 @@ class ImportResult {
   final bool isNew;
 }
 
+class ImportProgress {
+  ImportProgress({
+    required this.completed,
+    required this.total,
+    required this.currentName,
+  });
+
+  final int completed;
+  final int total;
+  final String currentName;
+}
+
+typedef ImportProgressCallback = void Function(ImportProgress progress);
+
+class ImportBatchResult {
+  ImportBatchResult({
+    required this.selectedCount,
+    required this.importedCount,
+    required this.duplicateCount,
+    required this.skippedUnsupportedCount,
+    required this.failedCount,
+    required this.results,
+  });
+
+  final int selectedCount;
+  final int importedCount;
+  final int duplicateCount;
+  final int skippedUnsupportedCount;
+  final int failedCount;
+  final List<ImportResult> results;
+}
+
+class _FolderCandidate {
+  _FolderCandidate({
+    required this.displayName,
+    required this.size,
+    required this.readBytes,
+  });
+
+  final String displayName;
+  final int size;
+  final Future<List<int>> Function() readBytes;
+}
+
 class ImportService {
   ImportService({
     required this.reader,
@@ -64,10 +110,19 @@ class ImportService {
   // pass the duplicate check and create two MediaStore entries.
   Future<void> _tail = Future.value();
 
-  /// Interactive import: opens the system picker (SAF on Android).
-  /// Returns null when the user cancels.
+  /// Backward-compatible single-result entry point. The picker itself now
+  /// supports multiple selection; all selected files are processed before the
+  /// first result is returned.
   Future<ImportResult?> importWithPicker() async {
-    final picked = await FilePicker.pickFile(
+    final batch = await importFilesWithPicker();
+    if (batch == null || batch.results.isEmpty) return null;
+    return batch.results.first;
+  }
+
+  Future<ImportBatchResult?> importFilesWithPicker({
+    ImportProgressCallback? onProgress,
+  }) async {
+    final picked = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: _allowedExtensions.keys.toList(),
       androidOptions: const android.FilePickerAndroidOptions(
@@ -78,7 +133,126 @@ class ImportService {
         ),
       ),
     );
-    if (picked == null) return null;
+    if (picked.isEmpty) return null;
+
+    var imported = 0;
+    var duplicates = 0;
+    var skippedUnsupported = 0;
+    var failed = 0;
+    var completed = 0;
+    final results = <ImportResult>[];
+    onProgress?.call(
+      ImportProgress(completed: 0, total: picked.length, currentName: ''),
+    );
+
+    for (final file in picked) {
+      try {
+        if (_allowedExtensions[_extension(file.name)] == null) {
+          skippedUnsupported++;
+        } else {
+          final result = await _importPickedFile(file);
+          results.add(result);
+          if (result.isNew) {
+            imported++;
+          } else {
+            duplicates++;
+          }
+        }
+      } catch (_) {
+        failed++;
+      } finally {
+        completed++;
+        onProgress?.call(
+          ImportProgress(
+            completed: completed,
+            total: picked.length,
+            currentName: file.name,
+          ),
+        );
+      }
+    }
+
+    return ImportBatchResult(
+      selectedCount: picked.length,
+      importedCount: imported,
+      duplicateCount: duplicates,
+      skippedUnsupportedCount: skippedUnsupported,
+      failedCount: failed,
+      results: results,
+    );
+  }
+
+  Future<ImportBatchResult?> importFolderWithPicker({
+    ImportProgressCallback? onProgress,
+  }) async {
+    final selected = await FilePicker.getDirectoryPath(
+      androidOptions: const android.FilePickerAndroidOptions(
+        safOptions: android.AndroidSAFOptions(
+          accessMode: android.AndroidSAFAccessMode.readOnly,
+          grant: android.AndroidSAFGrant.lifetime,
+          persistGrant: true,
+        ),
+      ),
+    );
+    if (selected == null || selected.isEmpty) return null;
+
+    final candidates = await _folderCandidates(selected);
+    var imported = 0;
+    var duplicates = 0;
+    var skippedUnsupported = 0;
+    var failed = 0;
+    var completed = 0;
+    final results = <ImportResult>[];
+    onProgress?.call(
+      ImportProgress(completed: 0, total: candidates.length, currentName: ''),
+    );
+
+    for (final candidate in candidates) {
+      try {
+        if (_allowedExtensions[_extension(candidate.displayName)] == null) {
+          skippedUnsupported++;
+        } else {
+          if (candidate.size > maxImportBytes) {
+            throw ImportException('bad-size');
+          }
+          // Folder imports deliberately omit sourceUri: importBytes uses the
+          // existing byte-copy path and the selected original stays in place.
+          final result = await importBytes(
+            displayName: candidate.displayName,
+            bytes: await candidate.readBytes(),
+          );
+          results.add(result);
+          if (result.isNew) {
+            imported++;
+          } else {
+            duplicates++;
+          }
+        }
+      } catch (_) {
+        failed++;
+      } finally {
+        completed++;
+        onProgress?.call(
+          ImportProgress(
+            completed: completed,
+            total: candidates.length,
+            currentName: candidate.displayName,
+          ),
+        );
+      }
+    }
+
+    return ImportBatchResult(
+      selectedCount: candidates.length,
+      importedCount: imported,
+      duplicateCount: duplicates,
+      skippedUnsupportedCount: skippedUnsupported,
+      failedCount: failed,
+      results: results,
+    );
+  }
+
+  Future<ImportResult> _importPickedFile(PlatformFile picked) async {
     final androidPicked = picked is android.AndroidPlatformFile ? picked : null;
     final sourceUri = androidPicked?.safHandle?.uri.toString();
     final pickerCachePath = androidPicked?.path;
@@ -116,6 +290,49 @@ class ImportService {
     }
   }
 
+  Future<List<_FolderCandidate>> _folderCandidates(String selected) async {
+    try {
+      if (selected.startsWith('content://')) {
+        final files = await storage.listTreeFiles(selected);
+        return files
+            .map(
+              (file) => _FolderCandidate(
+                displayName: file.name,
+                size: file.size,
+                readBytes: () => storage.readFile(file.uri),
+              ),
+            )
+            .toList();
+      }
+
+      final directory = Directory(selected);
+      if (!await directory.exists()) {
+        throw ImportException('folder-unavailable');
+      }
+      final entities = await directory
+          .list(recursive: true, followLinks: false)
+          .where((entity) => entity is File)
+          .toList();
+      return entities.cast<File>().map((file) {
+        return _FolderCandidate(
+          displayName: p.basename(file.path),
+          size: -1,
+          readBytes: () async {
+            final size = await file.length();
+            if (size > maxImportBytes) {
+              throw ImportException('bad-size');
+            }
+            return file.readAsBytes();
+          },
+        );
+      }).toList();
+    } on ImportException {
+      rethrow;
+    } catch (_) {
+      throw ImportException('folder-unavailable');
+    }
+  }
+
   /// Non-interactive import of known bytes (used by tests/seeding).
   Future<ImportResult> importBytes({
     required String displayName,
@@ -141,7 +358,7 @@ class ImportService {
     String? sourceUri,
     String? validationPath,
   }) async {
-    final ext = p.extension(displayName).replaceFirst('.', '').toLowerCase();
+    final ext = _extension(displayName);
     final mime = _allowedExtensions[ext];
     if (mime == null) {
       throw ImportException('unsupported-type');
@@ -305,6 +522,9 @@ class ImportService {
   }
 
   static String _clean(String s) => s.replaceAll(RegExp(r'\s+'), ' ').trim();
+
+  static String _extension(String name) =>
+      p.extension(name).replaceFirst('.', '').toLowerCase();
 }
 
 class ImportException implements Exception {

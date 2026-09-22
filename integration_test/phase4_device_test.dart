@@ -64,6 +64,7 @@ void main() {
     // 3. Engine on ARM64: info, content, search, CFI round-trip.
     final staged = await import.stagedPathForReading(first.bookId, 'epub');
     expect(staged, isNotNull);
+    late double expectedProgression;
     await reader.withBook(staged!, (s) async {
       final info = await reader.getDocumentInfo(s);
       expect(info.sectionCount.toInt() >= 2, isTrue);
@@ -80,17 +81,19 @@ void main() {
       expect(restored.sectionIndex.toInt(), 0);
       final p = await reader.getProgress(s, 0, start);
       expect(p.locatorJson, locator);
+      expectedProgression = p.totalProgression;
       await progress.saveProgress(
         bookId: first.bookId,
         locatorJson: p.locatorJson,
         sectionIndex: 0,
         charOffset: start,
-        progression: p.progression,
+        progression: p.totalProgression,
       );
     });
     final saved = await progress.loadProgress(first.bookId);
     expect(saved, isNotNull);
     expect(saved!.locatorJson, contains('cfi'));
+    expect(saved.progression, expectedProgression);
 
     // 4. Annotations with exact CFI anchors.
     final hlId = await ann.addHighlight(

@@ -55,6 +55,10 @@ class MainActivity : FlutterActivity() {
                             val uri = call.argument<String>("uri")!!
                             result.success(readFile(uri))
                         }
+                        "listTreeFiles" -> {
+                            val treeUri = call.argument<String>("treeUri")!!
+                            result.success(listTreeFiles(treeUri))
+                        }
                         "listCodarLib" -> result.success(listCodarLib())
                         "setSystemUi" -> {
                             val lightStatusBar =
@@ -284,6 +288,87 @@ class MainActivity : FlutterActivity() {
         }
         return contentResolver.openInputStream(uri)?.use { it.readBytes() }
             ?: throw IllegalStateException("Cannot open input stream for $uriString")
+    }
+
+    /**
+     * Enumerates a user-granted SAF tree without converting it to a raw path.
+     * The returned child URIs are read-only import sources; Flutter copies
+     * their bytes into CodarLib and never deletes the selected originals.
+     */
+    private fun listTreeFiles(treeUriString: String): List<Map<String, Any>> {
+        val treeUri = Uri.parse(treeUriString)
+        if (treeUri.scheme != "content") {
+            throw IllegalArgumentException("Invalid SAF tree URI: $treeUriString")
+        }
+        val out = mutableListOf<Map<String, Any>>()
+        enumerateTree(
+            treeUri,
+            DocumentsContract.getTreeDocumentId(treeUri),
+            mutableSetOf(),
+            out,
+        )
+        return out
+    }
+
+    private fun enumerateTree(
+        treeUri: Uri,
+        parentId: String,
+        visited: MutableSet<String>,
+        out: MutableList<Map<String, Any>>
+    ) {
+        if (!visited.add(parentId)) return
+
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+            treeUri,
+            parentId,
+        )
+        val projection = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+            DocumentsContract.Document.COLUMN_SIZE,
+        )
+        val cursor = contentResolver.query(childrenUri, projection, null, null, null)
+            ?: throw IllegalStateException("Cannot enumerate SAF tree")
+        cursor.use {
+            val idColumn = cursor.getColumnIndexOrThrow(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            )
+            val nameColumn = cursor.getColumnIndexOrThrow(
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            )
+            val mimeColumn = cursor.getColumnIndexOrThrow(
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+            )
+            val sizeColumn = cursor.getColumnIndex(
+                DocumentsContract.Document.COLUMN_SIZE,
+            )
+            while (cursor.moveToNext()) {
+                val childId = cursor.getString(idColumn)
+                val childUri = DocumentsContract.buildDocumentUriUsingTree(
+                    treeUri,
+                    childId,
+                )
+                val mime = cursor.getString(mimeColumn) ?: ""
+                if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                    enumerateTree(treeUri, childId, visited, out)
+                    continue
+                }
+                val name = cursor.getString(nameColumn) ?: ""
+                val size = if (sizeColumn >= 0 && !cursor.isNull(sizeColumn)) {
+                    cursor.getLong(sizeColumn)
+                } else {
+                    -1L
+                }
+                out.add(
+                    mapOf(
+                        "name" to name,
+                        "uri" to childUri.toString(),
+                        "size" to size,
+                    ),
+                )
+            }
+        }
     }
 
     private fun listCodarLib(): List<Map<String, String>> {

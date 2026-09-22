@@ -105,6 +105,50 @@ class BooksRepository {
     return rows.map(BookRecord.fromMap).toList();
   }
 
+  Future<List<LibraryBookRecord>> listLibraryBooks({
+    String? query,
+    String order = 'recent',
+    bool onlyFavorites = false,
+  }) async {
+    final orderBy = switch (order) {
+      'title' => 'b.title COLLATE NOCASE ASC',
+      'author' => 'b.author COLLATE NOCASE ASC, b.title COLLATE NOCASE ASC',
+      'added' => 'b.added_at DESC',
+      _ => 'b.last_opened_at DESC, b.added_at DESC',
+    };
+    final favJoin = onlyFavorites
+        ? 'JOIN favorites f ON f.book_id = b.book_id'
+        : '';
+    const progressColumns = '''
+      p.locator_json AS progress_locator_json,
+      p.section_index AS progress_section_index,
+      p.char_offset AS progress_char_offset,
+      p.progression AS progress_progression,
+      p.updated_at AS progress_updated_at
+    ''';
+    final escaped = query
+        ?.trim()
+        .replaceAll('\\', '\\\\')
+        .replaceAll('%', '\\%')
+        .replaceAll('_', '\\_');
+    final like = escaped == null ? null : '%$escaped%';
+
+    final rows = like == null || like == '%%'
+        ? await _db.db.rawQuery(
+            'SELECT b.*, $progressColumns FROM books b '
+            '$favJoin LEFT JOIN reading_progress p ON p.book_id = b.book_id '
+            'ORDER BY $orderBy',
+          )
+        : await _db.db.rawQuery(
+            'SELECT b.*, $progressColumns FROM books b '
+            '$favJoin LEFT JOIN reading_progress p ON p.book_id = b.book_id '
+            'WHERE b.title LIKE ? ESCAPE "\\" OR '
+            'b.author LIKE ? ESCAPE "\\" ORDER BY $orderBy',
+            [like, like],
+          );
+    return rows.map(LibraryBookRecord.fromMap).toList();
+  }
+
   Future<List<BookRecord>> continueReading({int limit = 10}) async {
     final rows = await _db.db.rawQuery(
       '''
