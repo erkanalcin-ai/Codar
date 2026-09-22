@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Codar Gizlilik Politikası">
+  <title>Codar Gizlilik Politikası</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172033;
+      --muted: #5d6678;
+      --paper: #ffffff;
+      --page: #f3f5f8;
+      --line: #dfe4ec;
+      --accent: #234f8f;
+      --accent-soft: #eaf1fb;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      background: var(--page);
+      color: var(--ink);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        sans-serif;
+      line-height: 1.7;
+    }
+
+    main {
+      width: min(100% - 32px, 860px);
+      margin: 32px auto;
+      padding: 0 0 40px;
+    }
+
+    article {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: 0 12px 32px rgba(23, 32, 51, 0.07);
+      overflow: hidden;
+    }
+
+    header {
+      padding: 42px 42px 34px;
+      background: linear-gradient(135deg, #1e4278, #2b65a8);
+      color: #fff;
+    }
+
+    header h1 {
+      margin: 0 0 10px;
+      font-size: clamp(2rem, 5vw, 3rem);
+      line-height: 1.15;
+      letter-spacing: -0.03em;
+    }
+
+    header p {
+      margin: 0;
+      color: #eaf2ff;
+    }
+
+    .meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 24px;
+      font-size: 0.95rem;
+    }
+
+    .meta div {
+      padding: 10px 12px;
+      border: 1px solid rgba(255, 255, 255, 0.24);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    .content { padding: 34px 42px 44px; }
+
+    h2 {
+      margin: 32px 0 10px;
+      color: var(--accent);
+      font-size: 1.35rem;
+      line-height: 1.3;
+    }
+
+    h2:first-child { margin-top: 0; }
+
+    p { margin: 0 0 14px; }
+
+    ul { margin: 8px 0 18px; padding-left: 1.25rem; }
+
+    li { margin: 5px 0; }
+
+    a { color: var(--accent); }
+
+    .notice {
+      margin: 0 0 24px;
+      padding: 16px 18px;
+      border-left: 4px solid var(--accent);
+      border-radius: 8px;
+      background: var(--accent-soft);
+    }
+
+    code {
+      padding: 0.1em 0.3em;
+      border-radius: 4px;
+      background: #eef1f5;
+      font-size: 0.92em;
+    }
+
+    footer {
+      margin-top: 28px;
+      padding-top: 20px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    @media (max-width: 600px) {
+      main { width: min(100% - 18px, 860px); margin: 9px auto; }
+      article { border-radius: 12px; }
+      header { padding: 30px 22px 25px; }
+      .content { padding: 26px 22px 32px; }
+      .meta { grid-template-columns: 1fr; }
+      h2 { font-size: 1.2rem; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <article>
+      <header>
+        <h1>Codar Gizlilik Politikası</h1>
+        <p>Codar uygulamasının verileri nasıl işlediğini açıklar.</p>
+        <div class="meta" aria-label="Politika bilgileri">
+          <div><strong>Geliştirici:</strong> Erkan ALÇİN</div>
+          <div><strong>Son güncelleme:</strong> 22 Eylül 2026</div>
+        </div>
+      </header>
+
+      <div class="content">
+        <section>
+          <h2>Genel Bilgiler</h2>
+          <p>Codar, kitap dosyalarını ve okuma verilerini öncelikli olarak kullanıcının cihazında tutan yerel odaklı bir e-kitap okuma uygulamasıdır.</p>
+          <p>Codar’da kullanıcı hesabı oluşturulmaz. Codar’ın kendi backend’i, bulut senkronizasyonu, reklam sistemi, analytics sistemi veya crash reporting sistemi bulunmaz.</p>
+        </section>
+
+        <section>
+          <h2>Toplanan ve İşlenen Veriler</h2>
+          <p>Codar aşağıdaki verileri cihazda işleyebilir:</p>
+          <ul>
+            <li>Kullanıcının seçtiği kitap dosyaları ve dosya bilgileri.</li>
+            <li>Kitap başlığı, yazar, dil, format ve gömülü kitap metadata’sı.</li>
+            <li>Kullanıcının düzenlediği kitap bilgileri.</li>
+            <li>Okuma ilerlemesi ve son açılma zamanı.</li>
+            <li>Vurgular, notlar, yer imleri ve alıntılar.</li>
+            <li>Favoriler ve koleksiyonlar.</li>
+            <li>Okuyucu görünüm ayarları ve uygulama tercihleri.</li>
+            <li>İçe aktarılan veya dışa aktarılan yerel yedek dosyaları.</li>
+            <li>Kullanıcı çevrimiçi zenginleştirmeyi etkinleştirirse, metadata sorgusu için kitap başlığı, yazar veya ISBN.</li>
+          </ul>
+          <p>Codar; ad, e-posta, telefon numarası, konum, kişiler, kamera, mikrofon, reklam kimliği veya hesap kimlik bilgilerini istemez ve işlemez.</p>
+        </section>
+
+        <section>
+          <h2>Verilerin Kullanım Amaçları</h2>
+          <p>Veriler yalnızca:</p>
+          <ul>
+            <li>Kitapları cihazda listelemek ve açmak,</li>
+            <li>Okuma konumunu geri yüklemek,</li>
+            <li>Not, vurgu ve yer imlerini göstermek,</li>
+            <li>Favori ve koleksiyon özelliklerini sağlamak,</li>
+            <li>Kullanıcı ayarlarını korumak,</li>
+            <li>Kullanıcının talep ettiği metadata ve kapak zenginleştirmesini gerçekleştirmek,</li>
+            <li>Kullanıcının seçtiği yedekleme işlemini yürütmek</li>
+          </ul>
+          <p>amacıyla kullanılır.</p>
+        </section>
+
+        <section>
+          <h2>Kitap Dosyaları ve Yerel Veriler</h2>
+          <p>Kitap dosyaları Android cihazlarda Codar tarafından kullanılan <code>Downloads/CodarLib/</code> alanında veya eski Android sürümlerinde uygulamaya özel depolama alanında tutulur.</p>
+          <p>Codar, kitap dosyasının içeriğini metadata veya annotation yazımıyla değiştirmez. Okuma ilerlemesi, notlar, vurgular ve diğer kullanıcı verileri kitap dosyasının dışında yerel SQLite veritabanında saklanır.</p>
+          <p>Kullanıcı bir dosyayı içe aktardığında Codar dosyayı doğrular ve başarılı aktarım sonrasında seçilen kaynak dosyayı CodarLib’e taşıyabilir. Kullanıcının seçtiği dosya okunamazsa kaynak dosya taşınmaz.</p>
+        </section>
+
+        <section>
+          <h2>İnternet ve Ağ Kullanımı</h2>
+          <p>Codar’ın internet kullanımı isteğe bağlı Open Library zenginleştirmesiyle sınırlıdır.</p>
+          <p>Bu özellik etkinleştirildiğinde veya kullanıcı manuel olarak istediğinde Codar, kitap metadata’sını Open Library’den aramak ve kapak görseli indirmek için HTTPS bağlantıları kurar.</p>
+          <p>Kitap dosyası, kitap metni, okuma ilerlemesi, notlar, vurgular ve yer imleri Codar tarafından internet üzerinden gönderilmez.</p>
+          <p>Open Library gibi üçüncü taraf sunucular, bağlantı sırasında IP adresi ve teknik bağlantı bilgilerini kendi sistemlerinde işleyebilir. Bu işlemler ilgili üçüncü tarafın kendi politikalarına tabidir.</p>
+        </section>
+
+        <section>
+          <h2>Üçüncü Taraf Hizmetleri</h2>
+          <ul>
+            <li><strong>Open Library:</strong> Kitap metadata’sı ve kapak bilgisi sorguları.</li>
+            <li><strong>Open Library Covers:</strong> Kapak görsellerinin alınması.</li>
+            <li><strong>Android Storage Access Framework ve MediaStore:</strong> Kullanıcının dosya seçmesi, içe aktarması ve yerel depolaması.</li>
+            <li><strong>Flutter, SQLite, Flutter Rust Bridge ve ebook-rs:</strong> Uygulama arayüzü, yerel veritabanı ve kitap dosyası işleme kütüphaneleri.</li>
+          </ul>
+          <p>Codar bu hizmetlere kitap dosyasının tamamını veya okuma notlarını göndermez.</p>
+        </section>
+
+        <section>
+          <h2>Reklamlar</h2>
+          <p>Codar reklam göstermez ve reklam SDK’sı kullanmaz.</p>
+        </section>
+
+        <section>
+          <h2>Veri Paylaşımı</h2>
+          <p>Codar, kullanıcı verilerini satmaz veya reklam amacıyla paylaşmaz.</p>
+          <p>Codar’ın kendi sunucusu bulunmadığından kullanıcı hesabı, profil veya okuma senkronizasyonu verisi geliştiriciye aktarılmaz.</p>
+          <p>Yalnızca çevrimiçi metadata zenginleştirmesi sırasında gerekli kitap metadata’sı Open Library’ye gönderilebilir. Kullanıcı tarafından seçilen yedekleme hedefi başka bir dosya veya bulut sağlayıcısıysa, yedek dosyasının işlenmesi ilgili sağlayıcının politikalarına tabi olabilir.</p>
+        </section>
+
+        <section>
+          <h2>Veri Saklama ve Silme</h2>
+          <p>Yerel veriler, kullanıcı silene veya uygulama verileri işletim sistemi tarafından temizlenene kadar cihazda tutulabilir.</p>
+          <p>Kullanıcı bir kitabı sildiğinde Codar, uygulama içindeki kitap kaydıyla ilişkili metadata, okuma ilerlemesi, notlar, vurgular, yer imleri, favori bağlantıları ve uygulama özelindeki staged/kapak dosyalarını silebilir.</p>
+          <p>Kullanıcı “dosya kopyasını koru” seçeneğini tercih ederse <code>Downloads/CodarLib/</code> içindeki kitap dosyası korunabilir. Dışa aktarılmış backup JSON dosyalarının silinmesinden kullanıcı sorumludur.</p>
+          <p>Codar’da kullanıcı hesabı olmadığı için sunucu hesabı silme işlemi uygulanmaz.</p>
+        </section>
+
+        <section>
+          <h2>Veri Güvenliği</h2>
+          <p>Codar verileri Android’in uygulamaya özel depolama alanlarında ve Android’in scoped storage/MediaStore mekanizmalarıyla korunur.</p>
+          <p>Open Library bağlantıları HTTPS üzerinden yapılır.</p>
+          <p>Codar tarafından dışa aktarılan backup JSON dosyaları uygulama tarafından ayrıca şifrelenmez. Kullanıcı bu dosyaları güvenli bir konumda saklamalıdır.</p>
+          <p>Hiçbir elektronik depolama veya aktarım yöntemi mutlak güvenlik garantisi vermez. Cihaz kilidi, işletim sistemi güvenliği ve kullanıcının yedekleme konumu verilerin korunmasında önemlidir.</p>
+        </section>
+
+        <section>
+          <h2>Çocukların Gizliliği</h2>
+          <p>Codar kullanıcı hesabı oluşturmaz ve çocuklara ait kişisel verileri bilerek toplamayı amaçlamaz.</p>
+          <p>Bununla birlikte, kullanıcıların cihazlarına aktardığı kitap dosyaları veya notlar kişisel içerik içerebilir. Ebeveyn veya yasal temsilci, bu tür verilerle ilgili bir talep için aşağıdaki iletişim adresinden geliştiriciye ulaşabilir.</p>
+        </section>
+
+        <section>
+          <h2>Kullanıcı Hakları / Talepler</h2>
+          <p>Kullanıcılar:</p>
+          <ul>
+            <li>Kitap metadata’sını uygulama içinden düzenleyebilir,</li>
+            <li>Not, vurgu ve yer imlerini silebilir,</li>
+            <li>Kitapları ve ilişkili yerel kayıtları silebilir,</li>
+            <li>Verilerini JSON backup olarak dışa aktarabilir,</li>
+            <li>Backup verilerini içe aktarabilir,</li>
+            <li>Çevrimiçi metadata zenginleştirmesini kapatabilir.</li>
+          </ul>
+          <p>Gizlilikle ilgili sorular veya talepler için geliştiriciyle iletişime geçilebilir. Open Library tarafından saklanabilecek ağ veya hizmet kayıtları için ilgili üçüncü tarafın kendi başvuru yolları kullanılmalıdır.</p>
+        </section>
+
+        <section>
+          <h2>Gizlilik Politikası Değişiklikleri</h2>
+          <p>Codar’ın veri işleme davranışı değişirse bu politika güncellenir. Güncel politika, Google Play Store’daki politika bağlantısında ve mümkün olduğu ölçüde uygulama içinde yayımlanır.</p>
+          <p>Önemli değişikliklerde güncelleme tarihi değiştirilir.</p>
+        </section>
+
+        <section>
+          <h2>İletişim</h2>
+          <p><strong>Geliştirici:</strong> Erkan ALÇİN</p>
+          <p><strong>Uygulama:</strong> Codar</p>
+          <p><strong>Gizlilik iletişim e-postası:</strong> <a href="mailto:erkanalcin@gmail.com">erkanalcin@gmail.com</a></p>
+        </section>
+
+        <footer>
+          Bu sayfa Codar uygulamasının mevcut veri işleme davranışını açıklamak amacıyla hazırlanmıştır.
+        </footer>
+      </div>
+    </article>
+  </main>
+</body>
+</html>
