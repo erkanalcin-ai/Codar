@@ -8,12 +8,17 @@
 import 'package:codar/src/app/providers.dart';
 import 'package:codar/src/db/models.dart';
 import 'package:codar/src/l10n/strings.dart';
+import 'package:codar/src/library/import_service.dart';
+import 'package:codar/src/reader/locator_nav.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 Future<void> showBookActionsSheet(
-    BuildContext context, WidgetRef ref, BookRecord book) async {
+  BuildContext context,
+  WidgetRef ref,
+  BookRecord book,
+) async {
   final locale = ref.read(localeProvider);
   final lib = ref.read(libraryRepoProvider);
   final fav = await lib.isFavorite(book.bookId);
@@ -26,10 +31,18 @@ Future<void> showBookActionsSheet(
         children: [
           ListTile(
             leading: const Icon(Icons.menu_book_outlined),
-            title: Text(book.title.isEmpty ? '—' : book.title,
-                maxLines: 1, overflow: TextOverflow.ellipsis),
-            subtitle: book.author.isEmpty ? null : Text(book.author,
-                maxLines: 1, overflow: TextOverflow.ellipsis),
+            title: Text(
+              book.title.isEmpty ? '—' : book.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            subtitle: book.author.isEmpty
+                ? null
+                : Text(
+                    book.author,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
           ),
           const Divider(height: 1),
           ListTile(
@@ -37,7 +50,7 @@ Future<void> showBookActionsSheet(
             title: Text(tr(locale, 'read')),
             onTap: () {
               Navigator.pop(ctx);
-              context.push('/book/${Uri.encodeComponent(book.bookId)}');
+              context.push(readerRouteFor(book.bookId));
             },
           ),
           ListTile(
@@ -49,10 +62,11 @@ Future<void> showBookActionsSheet(
             },
           ),
           ListTile(
-            leading: Icon(fav ? Icons.favorite : Icons.favorite_border,
-                color: fav ? Colors.red : null),
-            title: Text(tr(
-                locale, fav ? 'removeFavorite' : 'addFavorite')),
+            leading: Icon(
+              fav ? Icons.favorite : Icons.favorite_border,
+              color: fav ? Colors.red : null,
+            ),
+            title: Text(tr(locale, fav ? 'removeFavorite' : 'addFavorite')),
             onTap: () async {
               Navigator.pop(ctx);
               await ref
@@ -85,7 +99,10 @@ Future<void> showBookActionsSheet(
 
 /// Collection membership editor with checkmarks.
 Future<void> showCollectionEditor(
-    BuildContext context, WidgetRef ref, BookRecord book) async {
+  BuildContext context,
+  WidgetRef ref,
+  BookRecord book,
+) async {
   final repo = ref.read(libraryRepoProvider);
   final cols = await repo.collections();
   final member = await repo.collectionIdsForBook(book.bookId);
@@ -112,7 +129,10 @@ Future<void> showCollectionEditor(
                           onChanged: (v) async {
                             if (c.id == null) return;
                             await repo.setBookInCollection(
-                                c.id!, book.bookId, v ?? false);
+                              c.id!,
+                              book.bookId,
+                              v ?? false,
+                            );
                             setState(() {
                               if (v ?? false) {
                                 selected.add(c.id!);
@@ -120,9 +140,7 @@ Future<void> showCollectionEditor(
                                 selected.remove(c.id!);
                               }
                             });
-                            ref
-                                .read(libraryRefreshProvider.notifier)
-                                .bump();
+                            ref.read(libraryRefreshProvider.notifier).bump();
                           },
                         ),
                     ],
@@ -130,8 +148,9 @@ Future<void> showCollectionEditor(
           ),
           actions: [
             TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: Text(tr(locale, 'cancel'))),
+              onPressed: () => Navigator.pop(ctx),
+              child: Text(tr(locale, 'cancel')),
+            ),
           ],
         ),
       );
@@ -143,7 +162,10 @@ Future<void> showCollectionEditor(
 /// to the Settings preference (`delete_file_default`, default: delete).
 /// Returns true only when the book was actually deleted.
 Future<bool> confirmDeleteBook(
-    BuildContext context, WidgetRef ref, String bookId) async {
+  BuildContext context,
+  WidgetRef ref,
+  String bookId,
+) async {
   final locale = ref.read(localeProvider);
   final settings = ref.read(settingsRepoProvider);
   final defaultDeleteFile =
@@ -172,17 +194,30 @@ Future<bool> confirmDeleteBook(
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: Text(tr(locale, 'cancel'))),
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(tr(locale, 'cancel')),
+          ),
           TextButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: Text(tr(locale, 'delete'))),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(tr(locale, 'delete')),
+          ),
         ],
       ),
     ),
   );
   if (ok != true || !context.mounted) return false;
-  await ref.read(importServiceProvider).deleteBook(bookId, deleteFile: deleteFile);
+  try {
+    await ref
+        .read(importServiceProvider)
+        .deleteBook(bookId, deleteFile: deleteFile);
+  } on ImportException {
+    if (context.mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(tr(locale, 'deleteFileFailed'))));
+    }
+    return false;
+  }
   ref.read(libraryRefreshProvider.notifier).bump();
   return true;
 }

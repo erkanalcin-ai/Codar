@@ -12,6 +12,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 [dependencies]
 # Phase 0 correction: ONLY ebook-rs 0.16.6, exact pin, minimal features.
 ebook-rs = { version = "=0.16.6", default-features = false, features = ["pdf"] }
+pdf_oxide = "=0.3.78"
 # Must stay in lockstep with the Dart flutter_rust_bridge package (2.13.0).
 flutter_rust_bridge = "=2.13.0"
 serde = { version = "1", features = ["derive"] }

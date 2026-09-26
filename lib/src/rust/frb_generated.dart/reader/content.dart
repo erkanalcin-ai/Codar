@@ -48,6 +48,7 @@ class SectionContent {
   final String html;
   final String plainText;
   final BigInt charCount;
+  final List<SectionImage> images;
 
   const SectionContent({
     required this.index,
@@ -56,6 +57,7 @@ class SectionContent {
     required this.html,
     required this.plainText,
     required this.charCount,
+    required this.images,
   });
 
   @override
@@ -65,7 +67,8 @@ class SectionContent {
       href.hashCode ^
       html.hashCode ^
       plainText.hashCode ^
-      charCount.hashCode;
+      charCount.hashCode ^
+      images.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -77,5 +80,77 @@ class SectionContent {
           href == other.href &&
           html == other.html &&
           plainText == other.plainText &&
-          charCount == other.charCount;
+          charCount == other.charCount &&
+          images == other.images;
+}
+
+/// One lazily retrieved bitmap used by the current section/page.
+///
+/// HTML-backed formats use `source` to match an image tag to its archive
+/// bytes. PDF images use a synthetic source and include page placement data.
+class SectionImage {
+  final String source;
+  final String mimeType;
+  final Uint8List data;
+  final int pixelWidth;
+  final int pixelHeight;
+  final String dataFormat;
+  final double left;
+  final double top;
+  final double displayWidth;
+  final double displayHeight;
+  final double pageWidth;
+  final double pageHeight;
+  final int rotationDegrees;
+
+  const SectionImage({
+    required this.source,
+    required this.mimeType,
+    required this.data,
+    required this.pixelWidth,
+    required this.pixelHeight,
+    required this.dataFormat,
+    required this.left,
+    required this.top,
+    required this.displayWidth,
+    required this.displayHeight,
+    required this.pageWidth,
+    required this.pageHeight,
+    required this.rotationDegrees,
+  });
+
+  @override
+  int get hashCode =>
+      source.hashCode ^
+      mimeType.hashCode ^
+      data.hashCode ^
+      pixelWidth.hashCode ^
+      pixelHeight.hashCode ^
+      dataFormat.hashCode ^
+      left.hashCode ^
+      top.hashCode ^
+      displayWidth.hashCode ^
+      displayHeight.hashCode ^
+      pageWidth.hashCode ^
+      pageHeight.hashCode ^
+      rotationDegrees.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SectionImage &&
+          runtimeType == other.runtimeType &&
+          source == other.source &&
+          mimeType == other.mimeType &&
+          data == other.data &&
+          pixelWidth == other.pixelWidth &&
+          pixelHeight == other.pixelHeight &&
+          dataFormat == other.dataFormat &&
+          left == other.left &&
+          top == other.top &&
+          displayWidth == other.displayWidth &&
+          displayHeight == other.displayHeight &&
+          pageWidth == other.pageWidth &&
+          pageHeight == other.pageHeight &&
+          rotationDegrees == other.rotationDegrees;
 }

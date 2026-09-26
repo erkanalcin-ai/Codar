@@ -268,7 +268,8 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
           ? await service.importFilesWithPicker(onProgress: _onProgress)
           : await service.importFolderWithPicker(onProgress: _onProgress);
       if (!mounted || !context.mounted || result == null) return;
-      if (result.importedCount > 0) {
+      if (result.importedCount > 0 ||
+          result.results.any((book) => book.fileReattached)) {
         ref.read(libraryRefreshProvider.notifier).bump();
       }
       await _showBatchSummary(context, locale, result);
@@ -314,11 +315,14 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         .replaceAll('{duplicates}', '${result.duplicateCount}')
         .replaceAll('{skipped}', '${result.skippedUnsupportedCount}')
         .replaceAll('{failed}', '${result.failedCount}');
+    final message = result.sourceRetainedCount == 0
+        ? summary
+        : '$summary\n${result.sourceRetainedCount}: ${tr(locale, 'sourceRetained')}';
     return showDialog<void>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: Text(tr(locale, 'importBook')),
-        content: Text(summary),
+        content: Text(message),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext),

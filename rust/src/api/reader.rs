@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::reader::{content, format, locator, metadata, search, session};
 
 // Re-export DTOs so generated bindings carry them.
-pub use crate::reader::content::{PaginationResult, SectionContent};
+pub use crate::reader::content::{PaginationResult, SectionContent, SectionImage};
 pub use crate::reader::locator::{ProgressInfo, RestoredLocation};
 pub use crate::reader::metadata::{ChapterInfo, DocumentInfo};
 pub use crate::reader::search::SearchHit;
@@ -66,10 +66,20 @@ pub fn open_book(path: String) -> Result<OpenBookResult, ReaderError> {
         return Err(ReaderError::InvalidPath(format!("not a file: {path}")));
     }
     let fmt = format::BookFormat::detect(fs_path).map_err(ReaderError::UnsupportedFormat)?;
-    let book =
-        format::open_unified(fs_path, fmt).map_err(|e| ReaderError::OpenFailed(e.to_string()))?;
-    let info = metadata::document_info(&book, fmt);
-    let session_id = session::insert(book, fmt, path);
+    let (info, session_id) = if fmt == format::BookFormat::Pdf {
+        let (book, document, page_count) =
+            format::open_pdf_lazy(fs_path).map_err(|e| ReaderError::OpenFailed(e.to_string()))?;
+        let mut info = metadata::document_info(&book, fmt);
+        info.fingerprint = format::stable_pdf_fingerprint(&document.source_bytes);
+        let session_id = session::insert_pdf(book, document, page_count, path);
+        (info, session_id)
+    } else {
+        let book = format::open_unified(fs_path, fmt)
+            .map_err(|e| ReaderError::OpenFailed(e.to_string()))?;
+        let info = metadata::document_info(&book, fmt);
+        let session_id = session::insert(book, fmt, path);
+        (info, session_id)
+    };
     Ok(OpenBookResult { session_id, info })
 }
 
@@ -112,9 +122,16 @@ pub fn get_chapters(session_id: u64) -> Result<Vec<ChapterInfo>, ReaderError> {
 /// Section content by spine/section index.
 pub fn get_content(session_id: u64, section_index: u64) -> Result<SectionContent, ReaderError> {
     let idx = section_index as usize;
-    session::with_book(session_id, |b| content::section_content(b, idx))
-        .ok_or(ReaderError::UnknownSession(session_id))?
-        .ok_or(ReaderError::InvalidSection(section_index))
+    let result = if let Some(content) = session::with_pdf(session_id, |pdf| pdf.content(idx)) {
+        content
+            .map_err(ReaderError::ContentFailed)?
+            .ok_or(ReaderError::InvalidSection(section_index))
+    } else {
+        session::with_book(session_id, |b| content::section_content(b, idx))
+            .ok_or(ReaderError::UnknownSession(session_id))?
+            .ok_or(ReaderError::InvalidSection(section_index))
+    };
+    result
 }
 
 /// Section index for a spine/manifest href (`None` when unknown).
@@ -142,6 +159,58 @@ pub fn get_page(session_id: u64, page_index: u64) -> Result<SectionContent, Read
 
 /// Full-text search. Every hit carries section index + CFI + char offset.
 pub fn search(session_id: u64, query: String) -> Result<Vec<SearchHit>, ReaderError> {
+    if let Some(matches) = session::with_pdf(session_id, |pdf| {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut matches = Vec::new();
+        for index in 0..pdf.page_count {
+            let page = pdf
+                .content(index)
+                .map_err(ReaderError::SearchFailed)?
+                .ok_or_else(|| ReaderError::SearchFailed(format!("missing PDF page {index}")))?;
+            let mut lower = String::new();
+            let mut folded_offsets = Vec::new();
+            for (char_offset, character) in page.plain_text.chars().enumerate() {
+                for folded in character.to_lowercase() {
+                    lower.push(folded);
+                    folded_offsets.push(char_offset);
+                }
+            }
+            let chars: Vec<char> = page.plain_text.chars().collect();
+            for (byte_offset, _) in lower.match_indices(&needle) {
+                let folded_index = lower[..byte_offset].chars().count();
+                let char_offset = folded_offsets
+                    .get(folded_index)
+                    .copied()
+                    .unwrap_or(chars.len());
+                let start = char_offset.saturating_sub(40);
+                let end = (char_offset + needle.chars().count() + 80).min(chars.len());
+                let snippet: String = chars[start..end].iter().collect();
+                matches.push((index as u64, char_offset as u64, snippet));
+                if matches.len() >= 1000 {
+                    return Ok(matches);
+                }
+            }
+        }
+        Ok(matches)
+    }) {
+        let matches = matches?;
+        let mut hits = Vec::with_capacity(matches.len());
+        for (section_index, char_offset, snippet) in matches {
+            let locator_json = get_locator(session_id, section_index, char_offset)?;
+            let locator: ebook_rs::ReadiumLocator = serde_json::from_str(&locator_json)
+                .map_err(|e: serde_json::Error| ReaderError::LocatorFailed(e.to_string()))?;
+            hits.push(SearchHit {
+                section_index,
+                cfi: locator.locations.cfi.unwrap_or_default(),
+                char_offset,
+                snippet,
+            });
+        }
+        return Ok(hits);
+    }
     session::with_book(session_id, |b| search::search(b, &query))
         .ok_or(ReaderError::UnknownSession(session_id))
 }

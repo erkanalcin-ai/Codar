@@ -715,6 +715,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  int dco_decode_i_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
+  }
+
+  @protected
   List<String> dco_decode_list_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_String).toList();
@@ -736,6 +742,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   List<SearchHit> dco_decode_list_search_hit(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_search_hit).toList();
+  }
+
+  @protected
+  List<SectionImage> dco_decode_list_section_image(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_section_image).toList();
   }
 
   @protected
@@ -855,8 +867,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   SectionContent dco_decode_section_content(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 6)
-      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
     return SectionContent(
       index: dco_decode_u_64(arr[0]),
       idref: dco_decode_String(arr[1]),
@@ -864,6 +876,30 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       html: dco_decode_String(arr[3]),
       plainText: dco_decode_String(arr[4]),
       charCount: dco_decode_u_64(arr[5]),
+      images: dco_decode_list_section_image(arr[6]),
+    );
+  }
+
+  @protected
+  SectionImage dco_decode_section_image(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 13)
+      throw Exception('unexpected arr length: expect 13 but see ${arr.length}');
+    return SectionImage(
+      source: dco_decode_String(arr[0]),
+      mimeType: dco_decode_String(arr[1]),
+      data: dco_decode_list_prim_u_8_strict(arr[2]),
+      pixelWidth: dco_decode_u_32(arr[3]),
+      pixelHeight: dco_decode_u_32(arr[4]),
+      dataFormat: dco_decode_String(arr[5]),
+      left: dco_decode_f_32(arr[6]),
+      top: dco_decode_f_32(arr[7]),
+      displayWidth: dco_decode_f_32(arr[8]),
+      displayHeight: dco_decode_f_32(arr[9]),
+      pageWidth: dco_decode_f_32(arr[10]),
+      pageHeight: dco_decode_f_32(arr[11]),
+      rotationDegrees: dco_decode_i_32(arr[12]),
     );
   }
 
@@ -975,6 +1011,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  int sse_decode_i_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getInt32();
+  }
+
+  @protected
   List<String> sse_decode_list_String(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -1013,6 +1055,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var ans_ = <SearchHit>[];
     for (var idx_ = 0; idx_ < len_; ++idx_) {
       ans_.add(sse_decode_search_hit(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<SectionImage> sse_decode_list_section_image(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <SectionImage>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_section_image(deserializer));
     }
     return ans_;
   }
@@ -1167,6 +1223,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_html = sse_decode_String(deserializer);
     var var_plainText = sse_decode_String(deserializer);
     var var_charCount = sse_decode_u_64(deserializer);
+    var var_images = sse_decode_list_section_image(deserializer);
     return SectionContent(
       index: var_index,
       idref: var_idref,
@@ -1174,6 +1231,40 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       html: var_html,
       plainText: var_plainText,
       charCount: var_charCount,
+      images: var_images,
+    );
+  }
+
+  @protected
+  SectionImage sse_decode_section_image(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_source = sse_decode_String(deserializer);
+    var var_mimeType = sse_decode_String(deserializer);
+    var var_data = sse_decode_list_prim_u_8_strict(deserializer);
+    var var_pixelWidth = sse_decode_u_32(deserializer);
+    var var_pixelHeight = sse_decode_u_32(deserializer);
+    var var_dataFormat = sse_decode_String(deserializer);
+    var var_left = sse_decode_f_32(deserializer);
+    var var_top = sse_decode_f_32(deserializer);
+    var var_displayWidth = sse_decode_f_32(deserializer);
+    var var_displayHeight = sse_decode_f_32(deserializer);
+    var var_pageWidth = sse_decode_f_32(deserializer);
+    var var_pageHeight = sse_decode_f_32(deserializer);
+    var var_rotationDegrees = sse_decode_i_32(deserializer);
+    return SectionImage(
+      source: var_source,
+      mimeType: var_mimeType,
+      data: var_data,
+      pixelWidth: var_pixelWidth,
+      pixelHeight: var_pixelHeight,
+      dataFormat: var_dataFormat,
+      left: var_left,
+      top: var_top,
+      displayWidth: var_displayWidth,
+      displayHeight: var_displayHeight,
+      pageWidth: var_pageWidth,
+      pageHeight: var_pageHeight,
+      rotationDegrees: var_rotationDegrees,
     );
   }
 
@@ -1198,12 +1289,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @protected
   void sse_decode_unit(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-  }
-
-  @protected
-  int sse_decode_i_32(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return deserializer.buffer.getInt32();
   }
 
   @protected
@@ -1275,6 +1360,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_i_32(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putInt32(self);
+  }
+
+  @protected
   void sse_encode_list_String(List<String> self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
@@ -1314,6 +1405,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_i_32(self.length, serializer);
     for (final item in self) {
       sse_encode_search_hit(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_section_image(
+    List<SectionImage> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_section_image(item, serializer);
     }
   }
 
@@ -1448,6 +1551,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.html, serializer);
     sse_encode_String(self.plainText, serializer);
     sse_encode_u_64(self.charCount, serializer);
+    sse_encode_list_section_image(self.images, serializer);
+  }
+
+  @protected
+  void sse_encode_section_image(SectionImage self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.source, serializer);
+    sse_encode_String(self.mimeType, serializer);
+    sse_encode_list_prim_u_8_strict(self.data, serializer);
+    sse_encode_u_32(self.pixelWidth, serializer);
+    sse_encode_u_32(self.pixelHeight, serializer);
+    sse_encode_String(self.dataFormat, serializer);
+    sse_encode_f_32(self.left, serializer);
+    sse_encode_f_32(self.top, serializer);
+    sse_encode_f_32(self.displayWidth, serializer);
+    sse_encode_f_32(self.displayHeight, serializer);
+    sse_encode_f_32(self.pageWidth, serializer);
+    sse_encode_f_32(self.pageHeight, serializer);
+    sse_encode_i_32(self.rotationDegrees, serializer);
   }
 
   @protected
@@ -1471,11 +1593,5 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @protected
   void sse_encode_unit(void self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-  }
-
-  @protected
-  void sse_encode_i_32(int self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    serializer.buffer.putInt32(self);
   }
 }

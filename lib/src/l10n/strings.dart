@@ -4,6 +4,8 @@ const supportedLocales = ['tr', 'en'];
 
 const _tr = {
   'appTitle': 'Codar',
+  'appVersion': 'Sürüm',
+  'update': 'Güncelle',
   'home': 'Ana Sayfa',
   'library': 'Kütüphane',
   'records': 'Kayıtlarım',
@@ -29,6 +31,8 @@ const _tr = {
   'importOk': 'Kitap eklendi',
   'alreadyImported': 'Bu kitap zaten kütüphanede',
   'importFailed': 'Aktarım başarısız',
+  'sourceRetained': 'Kaynak dosya silinemedi; dosya yerinde kaldı.',
+  'deleteFileFailed': 'Dosya silinemedi; kitap kaydı korundu.',
   'unsupportedType': 'Desteklenmeyen dosya türü',
   'read': 'Oku',
   'openLibrary': 'Kütüphaneyi aç',
@@ -151,6 +155,8 @@ const _tr = {
 
 const _en = {
   'appTitle': 'Codar',
+  'appVersion': 'Version',
+  'update': 'Update',
   'home': 'Home',
   'library': 'Library',
   'records': 'My Records',
@@ -176,6 +182,9 @@ const _en = {
   'importOk': 'Book added',
   'alreadyImported': 'Already in library',
   'importFailed': 'Import failed',
+  'sourceRetained': 'The source file could not be deleted and was kept.',
+  'deleteFileFailed':
+      'The file could not be deleted; the book record was kept.',
   'unsupportedType': 'Unsupported file type',
   'read': 'Read',
   'openLibrary': 'Open library',

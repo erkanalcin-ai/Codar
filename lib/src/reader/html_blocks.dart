@@ -1,8 +1,12 @@
 // Minimal section-HTML parser for the reader. No WebView, no new packages.
 //
 // Safety: only a small allowlist of structural/inline tags is honored;
-// everything else (script, style, iframe, img, a, form, …) is dropped with
-// attributes. Only text nodes survive. Output never contains raw HTML.
+// everything else (script, style, iframe, a, form, …) is dropped with
+// attributes. Image bytes are passed separately as typed data. Output never
+// contains raw HTML.
+
+import 'dart:convert';
+import 'dart:typed_data';
 
 class SpanPart {
   SpanPart(this.text, {this.bold = false, this.italic = false});
@@ -11,34 +15,102 @@ class SpanPart {
   final bool italic;
 }
 
-class TextBlock {
+sealed class ReaderBlock {
+  const ReaderBlock();
+  String get plainText;
+}
+
+class TextBlock extends ReaderBlock {
   TextBlock({required this.kind, required this.parts});
 
   /// 'h1'..'h6', 'p', 'li', 'quote'
   final String kind;
   final List<SpanPart> parts;
 
+  @override
   String get plainText => parts.map((p) => p.text).join();
   bool get isHeading => kind.startsWith('h');
   bool get isEmpty => plainText.trim().isEmpty;
 }
 
+class ReaderImage {
+  const ReaderImage({
+    required this.source,
+    required this.mimeType,
+    required this.data,
+    this.pixelWidth = 0,
+    this.pixelHeight = 0,
+    this.dataFormat = 'encoded',
+    this.left = 0,
+    this.top = 0,
+    this.displayWidth = 0,
+    this.displayHeight = 0,
+    this.pageWidth = 0,
+    this.pageHeight = 0,
+    this.rotationDegrees = 0,
+  });
+
+  final String source;
+  final String mimeType;
+  final Uint8List data;
+  final int pixelWidth;
+  final int pixelHeight;
+  final String dataFormat;
+  final double left;
+  final double top;
+  final double displayWidth;
+  final double displayHeight;
+  final double pageWidth;
+  final double pageHeight;
+  final int rotationDegrees;
+
+  bool get isPdfPlacement => pageWidth > 0 && pageHeight > 0;
+  bool get isRenderableRaster =>
+      dataFormat == 'rgba8888' || _supportedRasterTypes.contains(mimeType);
+}
+
+class ImageBlock extends ReaderBlock {
+  const ImageBlock({required this.images});
+
+  /// One HTML image, or all bitmap placements on a textless PDF page.
+  final List<ReaderImage> images;
+
+  bool get isPdfPage =>
+      images.isNotEmpty && images.every((image) => image.isPdfPlacement);
+
+  @override
+  String get plainText => '';
+}
+
 const _dropEntirely = {'script', 'style', 'head', 'noscript', 'template'};
 
 /// Parse engine section HTML into render blocks.
-List<TextBlock> parseSectionHtml(String html) {
-  final blocks = <TextBlock>[];
+List<ReaderBlock> parseSectionHtml(
+  String html, {
+  List<ReaderImage> images = const [],
+}) {
+  final blocks = <ReaderBlock>[];
+  final imageBySource = {for (final image in images) image.source: image};
+  final matchedImageSources = <String>{};
   var parts = <SpanPart>[];
   String? blockKind;
   var bold = 0;
   var italic = 0;
   var dropDepth = 0;
+  var preDepth = 0;
   final buf = StringBuffer();
 
   void flushText() {
     if (buf.isEmpty) return;
-    final text = _decodeEntities(buf.toString());
+    final sourceText = buf.toString();
     buf.clear();
+    // In normal HTML flow, source indentation and line wrapping collapse to
+    // spaces. Keep explicit <br> breaks (handled separately) and preformatted
+    // text intact.
+    final normalizedSource = preDepth == 0
+        ? sourceText.replaceAll(RegExp(r'[\t\n\f\r ]+'), ' ')
+        : sourceText;
+    final text = _decodeEntities(normalizedSource);
     if (text.isEmpty) return;
     parts.add(SpanPart(text, bold: bold > 0, italic: italic > 0));
   }
@@ -85,6 +157,15 @@ List<TextBlock> parseSectionHtml(String html) {
     if (dropDepth > 0) continue;
 
     switch (name) {
+      case 'pre':
+        if (!closing) {
+          flushBlock();
+          blockKind = 'pre';
+          preDepth++;
+        } else {
+          flushBlock();
+          if (preDepth > 0) preDepth--;
+        }
       case 'p':
       case 'div':
       case 'section':
@@ -98,6 +179,18 @@ List<TextBlock> parseSectionHtml(String html) {
       case 'br':
         flushText();
         parts.add(SpanPart('\n'));
+      case 'img':
+        if (closing) break;
+        final source = _imageSource(inner);
+        if (source == null) break;
+        final image = imageBySource[source] ?? _decodeDataImage(source);
+        if (image == null || !image.isRenderableRaster) break;
+        flushText();
+        final resumeKind = blockKind;
+        flushBlock();
+        blocks.add(ImageBlock(images: [image]));
+        blockKind = resumeKind;
+        matchedImageSources.add(source);
       case 'h1':
       case 'h2':
       case 'h3':
@@ -148,8 +241,74 @@ List<TextBlock> parseSectionHtml(String html) {
     blockKind = 'p';
   }
   flushBlock();
+
+  final pdfImages = images
+      .where((image) => image.isPdfPlacement && image.isRenderableRaster)
+      .toList();
+  if (pdfImages.isNotEmpty) {
+    blocks.add(ImageBlock(images: pdfImages));
+  }
+  for (final image in images) {
+    if (!image.isPdfPlacement &&
+        image.isRenderableRaster &&
+        !matchedImageSources.contains(image.source)) {
+      blocks.add(ImageBlock(images: [image]));
+    }
+  }
   return blocks;
 }
+
+String? _imageSource(String tag) {
+  final source = _attribute(tag, 'src');
+  if (source == null) return null;
+  final decoded = _decodeEntities(source.trim());
+  if (decoded.isEmpty || decoded.startsWith('#')) return null;
+  final lower = decoded.toLowerCase();
+  if (lower.startsWith('http:') ||
+      lower.startsWith('https:') ||
+      lower.startsWith('//')) {
+    return null;
+  }
+  return decoded;
+}
+
+String? _attribute(String tag, String wanted) {
+  final attribute = RegExp(
+    r'\b' +
+        RegExp.escape(wanted) +
+        r'''\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))''',
+    caseSensitive: false,
+  ).firstMatch(tag);
+  return attribute?.group(1) ?? attribute?.group(2) ?? attribute?.group(3);
+}
+
+ReaderImage? _decodeDataImage(String source) {
+  if (!source.toLowerCase().startsWith('data:image/')) return null;
+  final comma = source.indexOf(',');
+  if (comma < 0) return null;
+  final metadata = source.substring(5, comma).split(';');
+  var mimeType = metadata.first.toLowerCase();
+  if (mimeType == 'image/jpg') mimeType = 'image/jpeg';
+  if (!_supportedRasterTypes.contains(mimeType)) return null;
+  try {
+    final encoded = source.substring(comma + 1);
+    final bytes = metadata.any((part) => part.toLowerCase() == 'base64')
+        ? base64.decode(encoded)
+        : Uint8List.fromList(utf8.encode(Uri.decodeComponent(encoded)));
+    if (bytes.isEmpty) return null;
+    return ReaderImage(source: source, mimeType: mimeType, data: bytes);
+  } on FormatException {
+    return null;
+  }
+}
+
+const _supportedRasterTypes = {
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+  'image/bmp',
+};
 
 String _decodeEntities(String s) {
   // Two passes: engine HTML may double-escape text (e.g. &amp;nbsp;).

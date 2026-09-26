@@ -2,9 +2,10 @@
 //
 // A picked source is never moved until Reader Core proves it is openable.
 // Invalid/unopenable sources therefore remain where the user selected them;
-// successful file-picker imports leave one physical book file in CodarLib.
-// Folder imports intentionally use the byte-copy path so selected originals
-// remain in place.
+// successful file-picker imports remove the selected source after the book
+// and CodarLib copy are recorded. If source removal fails, the user is told.
+// Folder imports retain selected originals; large PDFs are streamed from the
+// folder source to avoid a full Dart-side byte buffer.
 
 import 'dart:io';
 import 'dart:typed_data';
@@ -35,6 +36,7 @@ const _allowedExtensions = {
   'pdf': 'application/pdf',
   'txt': 'text/plain',
   'md': 'text/markdown',
+  'markdown': 'text/markdown',
 };
 
 /// Keep the engine out of pathological territory.
@@ -45,10 +47,14 @@ class ImportResult {
     required this.bookId,
     required this.title,
     required this.isNew,
+    this.sourceRetained = false,
+    this.fileReattached = false,
   });
   final String bookId;
   final String title;
   final bool isNew;
+  final bool sourceRetained;
+  final bool fileReattached;
 }
 
 class ImportProgress {
@@ -72,6 +78,7 @@ class ImportBatchResult {
     required this.duplicateCount,
     required this.skippedUnsupportedCount,
     required this.failedCount,
+    required this.sourceRetainedCount,
     required this.results,
   });
 
@@ -80,6 +87,7 @@ class ImportBatchResult {
   final int duplicateCount;
   final int skippedUnsupportedCount;
   final int failedCount;
+  final int sourceRetainedCount;
   final List<ImportResult> results;
 }
 
@@ -88,11 +96,15 @@ class _FolderCandidate {
     required this.displayName,
     required this.size,
     required this.readBytes,
+    this.sourceUri,
+    this.localPath,
   });
 
   final String displayName;
   final int size;
   final Future<List<int>> Function() readBytes;
+  final String? sourceUri;
+  final String? localPath;
 }
 
 class ImportService {
@@ -139,6 +151,7 @@ class ImportService {
     var duplicates = 0;
     var skippedUnsupported = 0;
     var failed = 0;
+    var sourceRetained = 0;
     var completed = 0;
     final results = <ImportResult>[];
     onProgress?.call(
@@ -152,6 +165,7 @@ class ImportService {
         } else {
           final result = await _importPickedFile(file);
           results.add(result);
+          if (result.sourceRetained) sourceRetained++;
           if (result.isNew) {
             imported++;
           } else {
@@ -178,6 +192,7 @@ class ImportService {
       duplicateCount: duplicates,
       skippedUnsupportedCount: skippedUnsupported,
       failedCount: failed,
+      sourceRetainedCount: sourceRetained,
       results: results,
     );
   }
@@ -215,12 +230,17 @@ class ImportService {
           if (candidate.size > maxImportBytes) {
             throw ImportException('bad-size');
           }
-          // Folder imports deliberately omit sourceUri: importBytes uses the
-          // existing byte-copy path and the selected original stays in place.
-          final result = await importBytes(
-            displayName: candidate.displayName,
-            bytes: await candidate.readBytes(),
-          );
+          // Stream large PDFs from their source and retain folder originals;
+          // other folder formats keep the existing byte-copy path.
+          final result =
+              _extension(candidate.displayName) == 'pdf' &&
+                  candidate.sourceUri != null &&
+                  candidate.size > 0
+              ? await _importFolderPdf(candidate)
+              : await importBytes(
+                  displayName: candidate.displayName,
+                  bytes: await candidate.readBytes(),
+                );
           results.add(result);
           if (result.isNew) {
             imported++;
@@ -248,6 +268,7 @@ class ImportService {
       duplicateCount: duplicates,
       skippedUnsupportedCount: skippedUnsupported,
       failedCount: failed,
+      sourceRetainedCount: 0,
       results: results,
     );
   }
@@ -268,12 +289,16 @@ class ImportService {
         // place and violate the single-physical-file contract.
         throw ImportException('source-unavailable');
       }
-      final bytes = await picked.readAsBytes();
+      final ext = _extension(picked.name);
+      // SAF exposes a cache file for validation. Hash PDFs from that file in
+      // chunks instead of also materializing the complete PDF in Dart memory.
+      final bytes = ext == 'pdf' ? const <int>[] : await picked.readAsBytes();
       return await importBytes(
         displayName: picked.name,
         bytes: bytes,
         sourceUri: sourceUri,
         validationPath: pickerCachePath,
+        sourceSize: pickedSize,
       );
     } finally {
       // file_picker materializes an app-private cache copy for SAF files.
@@ -299,7 +324,11 @@ class ImportService {
               (file) => _FolderCandidate(
                 displayName: file.name,
                 size: file.size,
-                readBytes: () => storage.readFile(file.uri),
+                sourceUri: file.uri,
+                readBytes: () => storage.readFile(
+                  file.uri,
+                  maxBytes: maxImportBytes,
+                ),
               ),
             )
             .toList();
@@ -313,23 +342,60 @@ class ImportService {
           .list(recursive: true, followLinks: false)
           .where((entity) => entity is File)
           .toList();
-      return entities.cast<File>().map((file) {
-        return _FolderCandidate(
-          displayName: p.basename(file.path),
-          size: -1,
-          readBytes: () async {
-            final size = await file.length();
-            if (size > maxImportBytes) {
-              throw ImportException('bad-size');
-            }
-            return file.readAsBytes();
-          },
+      final candidates = <_FolderCandidate>[];
+      for (final file in entities.cast<File>()) {
+        candidates.add(
+          _FolderCandidate(
+            displayName: p.basename(file.path),
+            size: await file.length(),
+            sourceUri: file.uri.toString(),
+            localPath: file.path,
+            readBytes: file.readAsBytes,
+          ),
         );
-      }).toList();
+      }
+      return candidates;
     } on ImportException {
       rethrow;
     } catch (_) {
       throw ImportException('folder-unavailable');
+    }
+  }
+
+  Future<ImportResult> _importFolderPdf(_FolderCandidate candidate) async {
+    final sourceUri = candidate.sourceUri!;
+    final localPath = candidate.localPath;
+    final validationPath =
+        localPath ??
+        p.join(
+          (await getTemporaryDirectory()).path,
+          'codar_folder_pdf_${DateTime.now().microsecondsSinceEpoch}.pdf',
+        );
+    final ownsValidationFile = localPath == null;
+    try {
+      if (ownsValidationFile) {
+        final copied = await storage.copyFileToPath(
+          uri: sourceUri,
+          path: validationPath,
+          size: candidate.size,
+        );
+        if (!copied) throw ImportException('source-unavailable');
+      }
+      return await importBytes(
+        displayName: candidate.displayName,
+        bytes: const [],
+        sourceUri: sourceUri,
+        validationPath: validationPath,
+        sourceSize: candidate.size,
+        removeSource: false,
+      );
+    } finally {
+      if (ownsValidationFile) {
+        try {
+          final validationFile = File(validationPath);
+          if (await validationFile.exists()) await validationFile.delete();
+        } catch (_) {}
+      }
     }
   }
 
@@ -339,6 +405,8 @@ class ImportService {
     required List<int> bytes,
     String? sourceUri,
     String? validationPath,
+    int? sourceSize,
+    bool removeSource = true,
   }) async {
     final next = _tail.then(
       (_) => _importBytesInner(
@@ -346,6 +414,8 @@ class ImportService {
         bytes,
         sourceUri: sourceUri,
         validationPath: validationPath,
+        sourceSize: sourceSize,
+        removeSource: removeSource,
       ),
     );
     _tail = next.then((_) {}, onError: (_) {});
@@ -357,13 +427,16 @@ class ImportService {
     List<int> bytes, {
     String? sourceUri,
     String? validationPath,
+    int? sourceSize,
+    bool removeSource = true,
   }) async {
     final ext = _extension(displayName);
     final mime = _allowedExtensions[ext];
     if (mime == null) {
       throw ImportException('unsupported-type');
     }
-    if (bytes.isEmpty || bytes.length > maxImportBytes) {
+    final fileSize = sourceSize ?? bytes.length;
+    if (fileSize <= 0 || fileSize > maxImportBytes) {
       throw ImportException('bad-size');
     }
 
@@ -397,7 +470,9 @@ class ImportService {
         sectionCount = info.sectionCount.toInt();
         fingerprint = info.fingerprint;
         if (title.isEmpty) title = p.basenameWithoutExtension(displayName);
-        bookId = stableBookId(bytes);
+        bookId = bytes.isEmpty && validationPath != null
+            ? await stableBookIdFromFile(probe)
+            : stableBookId(bytes);
       });
     } finally {
       if (ownsProbe && await probe.exists()) await probe.delete();
@@ -419,15 +494,32 @@ class ImportService {
           bytes: bytes,
           mime: mime,
           sourceUri: sourceUri,
+          size: fileSize,
         );
-        await books.upsertFile(
+        try {
+          await books.upsertFile(
+            bookId: existing.bookId,
+            kind: 'original',
+            displayName: displayName,
+            mime: mime,
+            mediastoreUri: uri,
+            cachePath: '',
+            size: fileSize,
+          );
+        } catch (_) {
+          await _discardUnregisteredCopy(uri);
+          rethrow;
+        }
+        await books.touchOpened(existing.bookId);
+        final sourceRetained = removeSource
+            ? await _removeCommittedSource(sourceUri)
+            : false;
+        return ImportResult(
           bookId: existing.bookId,
-          kind: 'original',
-          displayName: displayName,
-          mime: mime,
-          mediastoreUri: uri,
-          cachePath: '',
-          size: bytes.length,
+          title: existing.title,
+          isNew: false,
+          sourceRetained: sourceRetained,
+          fileReattached: true,
         );
       }
       await books.touchOpened(existing.bookId);
@@ -438,47 +530,70 @@ class ImportService {
       );
     }
 
-    // A picker import is a move: Reader Core has already proven the source
-    // openable, and native storage removes the source only after the
-    // CodarLib stream completes successfully. Byte imports remain available
-    // for bundled fixtures/tests and use the existing copy path.
+    // Keep the selected source until both database rows have committed.
     final uri = await _storeImportedFile(
       displayName: displayName,
       bytes: bytes,
       mime: mime,
       sourceUri: sourceUri,
+      size: fileSize,
     );
 
-    await books.upsertBook(
-      bookId: bookId,
-      title: title,
-      author: author,
-      language: language,
-      format: format,
-      sectionCount: sectionCount,
-      fileSize: bytes.length,
-      fingerprint: fingerprint,
-    );
-    await books.upsertFile(
-      bookId: bookId,
-      kind: 'original',
-      displayName: displayName,
-      mime: mime,
-      mediastoreUri: uri,
-      cachePath: '',
-      size: bytes.length,
-    );
+    try {
+      await books.addImportedBook(
+        bookId: bookId,
+        title: title,
+        author: author,
+        language: language,
+        format: format,
+        sectionCount: sectionCount,
+        fileSize: fileSize,
+        fingerprint: fingerprint,
+        displayName: displayName,
+        mime: mime,
+        mediastoreUri: uri,
+      );
+    } catch (_) {
+      await _discardUnregisteredCopy(uri);
+      rethrow;
+    }
+    final sourceRetained = removeSource
+        ? await _removeCommittedSource(sourceUri)
+        : false;
 
     // Private cover extraction (never touches the original).
-    await _extractCover(bookId, ext);
+    if (ext != 'pdf') await _extractCover(bookId, ext);
 
-    return ImportResult(bookId: bookId, title: title, isNew: true);
+    return ImportResult(
+      bookId: bookId,
+      title: title,
+      isNew: true,
+      sourceRetained: sourceRetained,
+    );
+  }
+
+  Future<void> _discardUnregisteredCopy(String uri) async {
+    try {
+      await storage.deleteFile(uri);
+    } catch (_) {
+      // The selected source still exists; keep the original failure.
+    }
+  }
+
+  Future<bool> _removeCommittedSource(String? sourceUri) async {
+    if (sourceUri == null) return false;
+    try {
+      return !await storage.deletePickedSource(sourceUri);
+    } catch (_) {
+      return true;
+    }
   }
 
   Future<String> _storeImportedFile({
     required String displayName,
     required List<int> bytes,
     required String mime,
+    required int size,
     String? sourceUri,
   }) async {
     return sourceUri == null
@@ -487,18 +602,18 @@ class ImportService {
             bytes: Uint8List.fromList(bytes),
             mime: mime,
           )
-        : await storage.movePickedFile(
+        : await storage.copyPickedFile(
             name: displayName,
             mime: mime,
             sourceUri: sourceUri,
-            size: bytes.length,
+            size: size,
           );
   }
 
   Future<void> _extractCover(String bookId, String ext) async {
-    final staged = await stagedPathForReading(bookId, ext);
-    if (staged == null) return;
     try {
+      final staged = await stagedPathForReading(bookId, ext);
+      if (staged == null) return;
       await reader.withBook(staged, (s) async {
         final cover = await reader.getCover(s);
         if (cover == null || cover.data.isEmpty) return;
@@ -527,8 +642,12 @@ class ImportService {
       return staged.path;
     }
     if (file.mediastoreUri.isEmpty) return null;
-    final bytes = await storage.readFile(file.mediastoreUri);
-    await staged.writeAsBytes(bytes, flush: true);
+    final copied = await storage.copyFileToPath(
+      uri: file.mediastoreUri,
+      path: staged.path,
+      size: file.size,
+    );
+    if (!copied) throw ImportException('source-unavailable');
     return staged.path;
   }
 
@@ -541,8 +660,12 @@ class ImportService {
       final file = await books.getFile(bookId, 'original');
       if (file != null && file.mediastoreUri.isNotEmpty) {
         try {
-          await storage.deleteFile(file.mediastoreUri);
-        } catch (_) {}
+          if (!await storage.deleteFile(file.mediastoreUri)) {
+            throw ImportException('delete-file-failed');
+          }
+        } catch (_) {
+          throw ImportException('delete-file-failed');
+        }
       }
     }
     final dir = await getApplicationSupportDirectory();

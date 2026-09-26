@@ -13,8 +13,9 @@ import 'package:flutter/foundation.dart';
 
 /// Thin typed handle for one open book. Not the book data itself.
 class ReaderSession {
-  ReaderSession(this.id);
+  ReaderSession(this.id, this.info);
   final BigInt id;
+  final DocumentInfo info;
   bool _closed = false;
   bool get isClosed => _closed;
   void markClosed() => _closed = true;
@@ -22,10 +23,13 @@ class ReaderSession {
 
 class CodarReaderService with ChangeNotifier {
   bool _ready = false;
+  Future<void>? _initFuture;
   bool get isReady => _ready;
   final Set<BigInt> _open = {};
 
-  Future<void> init() async {
+  Future<void> init() => _initFuture ??= _initialize();
+
+  Future<void> _initialize() async {
     if (_ready) return;
     try {
       await RustLib.init();
@@ -47,7 +51,7 @@ class CodarReaderService with ChangeNotifier {
     _requireReady();
     final res = await frb.openBook(path: path);
     _open.add(res.sessionId);
-    return ReaderSession(res.sessionId);
+    return ReaderSession(res.sessionId, res.info);
   }
 
   Future<bool> closeSession(ReaderSession session) async {
@@ -63,8 +67,7 @@ class CodarReaderService with ChangeNotifier {
     return n.toInt();
   }
 
-  Future<DocumentInfo> getDocumentInfo(ReaderSession s) =>
-      frb.getDocumentInfo(sessionId: s.id);
+  Future<DocumentInfo> getDocumentInfo(ReaderSession s) async => s.info;
 
   Future<frb.CoverImage?> getCover(ReaderSession s) =>
       frb.getCover(sessionId: s.id);
@@ -72,8 +75,12 @@ class CodarReaderService with ChangeNotifier {
   Future<List<ChapterInfo>> getChapters(ReaderSession s) =>
       frb.getChapters(sessionId: s.id);
 
-  Future<SectionContent> getContent(ReaderSession s, int sectionIndex) =>
-      frb.getContent(sessionId: s.id, sectionIndex: BigInt.from(sectionIndex));
+  Future<SectionContent> getContent(ReaderSession s, int sectionIndex) async {
+    return frb.getContent(
+      sessionId: s.id,
+      sectionIndex: BigInt.from(sectionIndex),
+    );
+  }
 
   Future<int?> findSection(ReaderSession s, String href) async {
     final v = await frb.findSection(sessionId: s.id, href: href);
@@ -86,23 +93,30 @@ class CodarReaderService with ChangeNotifier {
   Future<List<SearchHit>> search(ReaderSession s, String query) =>
       frb.search(sessionId: s.id, query: query);
 
-  Future<String> getLocator(ReaderSession s, int sectionIndex, int charOffset) =>
-      frb.getLocator(
-        sessionId: s.id,
-        sectionIndex: BigInt.from(sectionIndex),
-        charOffset: BigInt.from(charOffset),
-      );
+  Future<String> getLocator(
+    ReaderSession s,
+    int sectionIndex,
+    int charOffset,
+  ) => frb.getLocator(
+    sessionId: s.id,
+    sectionIndex: BigInt.from(sectionIndex),
+    charOffset: BigInt.from(charOffset),
+  );
 
-  Future<RestoredLocation> restoreLocator(ReaderSession s, String locatorJson) =>
-      frb.restoreLocator(sessionId: s.id, locatorJson: locatorJson);
+  Future<RestoredLocation> restoreLocator(
+    ReaderSession s,
+    String locatorJson,
+  ) => frb.restoreLocator(sessionId: s.id, locatorJson: locatorJson);
 
   Future<ProgressInfo> getProgress(
-          ReaderSession s, int sectionIndex, int charOffset) =>
-      frb.getProgress(
-        sessionId: s.id,
-        sectionIndex: BigInt.from(sectionIndex),
-        charOffset: BigInt.from(charOffset),
-      );
+    ReaderSession s,
+    int sectionIndex,
+    int charOffset,
+  ) => frb.getProgress(
+    sessionId: s.id,
+    sectionIndex: BigInt.from(sectionIndex),
+    charOffset: BigInt.from(charOffset),
+  );
 
   Future<PaginationResult> paginateSection(
     ReaderSession s,
@@ -112,20 +126,21 @@ class CodarReaderService with ChangeNotifier {
     int viewportWidthPx = 800,
     int viewportHeightPx = 1280,
     int marginPx = 48,
-  }) =>
-      frb.paginateSection(
-        sessionId: s.id,
-        sectionIndex: BigInt.from(sectionIndex),
-        fontSizePx: fontSizePx,
-        lineHeight: lineHeight,
-        viewportWidthPx: viewportWidthPx,
-        viewportHeightPx: viewportHeightPx,
-        marginPx: marginPx,
-      );
+  }) => frb.paginateSection(
+    sessionId: s.id,
+    sectionIndex: BigInt.from(sectionIndex),
+    fontSizePx: fontSizePx,
+    lineHeight: lineHeight,
+    viewportWidthPx: viewportWidthPx,
+    viewportHeightPx: viewportHeightPx,
+    marginPx: marginPx,
+  );
 
   /// Runs [fn] with a session that is always closed afterwards.
   Future<T> withBook<T>(
-      String path, Future<T> Function(ReaderSession s) fn) async {
+    String path,
+    Future<T> Function(ReaderSession s) fn,
+  ) async {
     final s = await openBook(path);
     try {
       return await fn(s);

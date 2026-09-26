@@ -5,16 +5,21 @@
 // plus quoted text; the CFI is the stable cross-session key.
 
 import 'dart:async';
+import 'dart:collection';
 import 'dart:math' as math;
 
 import 'package:codar/src/app/providers.dart';
 import 'package:codar/src/brand/codar_brand.dart';
 import 'package:codar/src/db/models.dart';
+import 'package:codar/src/db/repositories.dart';
 import 'package:codar/src/l10n/strings.dart';
 import 'package:codar/src/reader/html_blocks.dart';
+import 'package:codar/src/reader/reader_image_view.dart';
 import 'package:codar/src/reader/reader_service.dart';
+import 'package:codar/src/rust/frb_generated.dart/reader/content.dart'
+    as reader_dto;
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show SelectedContent;
+import 'package:flutter/rendering.dart' show ScrollCacheExtent, SelectedContent;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -96,15 +101,35 @@ class _PendingSelection {
   final int end;
 }
 
+class _PendingProgressSave {
+  const _PendingProgressSave(this.session, this.section, this.offset);
+
+  final ReaderSession session;
+  final int section;
+  final int offset;
+}
+
 class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   ReaderSession? _session;
   // Cached in initState: ref is unsafe to touch in dispose().
   late final CodarReaderService _readerSvc;
+  late final ProgressRepository _progressRepo;
   String? _error;
   BookRecord? _book;
   int _section = 0;
   int _sectionCount = 1;
-  List<TextBlock> _blocks = const [];
+  bool _isPdf = false;
+  final LinkedHashMap<int, _ReaderSection> _pdfSectionCache =
+      LinkedHashMap<int, _ReaderSection>();
+  final Map<int, Object> _pdfSectionErrors = {};
+  int? _pdfRequestedIndex;
+  int _pdfPrefetchDirection = 1;
+  Future<void>? _pdfLoadWorker;
+  int? _continuousSectionRequestedIndex;
+  Future<void>? _continuousSectionLoadWorker;
+  final Set<int> _loadingContinuousSections = {};
+  final Map<int, Object> _continuousSectionErrors = {};
+  List<ReaderBlock> _blocks = const [];
   List<_ReaderPage> _pages = const [];
   List<_ContinuousPage> _continuousPages = const [];
   int _pageIndex = 0;
@@ -123,10 +148,17 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   bool _saving = false;
   bool _controlsVisible = false;
   Timer? _controlsTimer;
+  Timer? _progressSaveTimer;
+  _PendingProgressSave? _pendingProgressSave;
+  Future<void> _progressSaveTail = Future.value();
   Offset? _pointerDown;
   bool _programmaticPageChange = false;
+  Size? _paginationViewport;
+  bool _viewportReflowScheduled = false;
+  bool _pendingViewportReflow = false;
   final _pageController = PageController();
   final _scrollController = ScrollController();
+  final _continuousPageNotifier = ValueNotifier<int>(0);
   final _regionFocus = FocusNode();
   final _regionKey = GlobalKey<SelectableRegionState>();
   static const _pageTopPadding = 88.0;
@@ -136,6 +168,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   void initState() {
     super.initState();
     _readerSvc = ref.read(readerServiceProvider);
+    _progressRepo = ref.read(progressRepoProvider);
     _scrollController.addListener(_onContinuousScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
@@ -145,18 +178,55 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final viewport = MediaQuery.sizeOf(context);
+    final previous = _paginationViewport;
+    _paginationViewport = viewport;
+    if (previous != null && previous != viewport && _session != null) {
+      _scheduleViewportReflow();
+    }
+  }
+
+  void _scheduleViewportReflow() {
+    if (_viewportReflowScheduled) return;
+    _viewportReflowScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _viewportReflowScheduled = false;
+      if (!mounted || _session == null) return;
+      if (_loading) {
+        _pendingViewportReflow = true;
+        return;
+      }
+      if (_continuousPages.isEmpty) return;
+      _pendingViewportReflow = false;
+      final active =
+          _continuousPages[_continuousIndex.clamp(
+            0,
+            _continuousPages.length - 1,
+          )];
+      final section = active.section.index;
+      final offset = active.page.startOffset;
+      if (_isPdf) _pdfSectionCache.clear();
+      unawaited(_loadBook(section, offset: offset, persistProgress: false));
+    });
+  }
+
+  @override
   void dispose() {
     final s = _session;
     _session = null;
     if (s != null) {
       // Fire-and-forget: dispose() cannot await, and the session close is
       // best-effort (the service also sweeps on its own dispose).
-      _readerSvc.closeSession(s);
+      unawaited(_closeSessionAfterSavingProgress(s));
     }
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     _controlsTimer?.cancel();
+    _progressSaveTimer?.cancel();
     _pageController.dispose();
     _scrollController.dispose();
+    _continuousPageNotifier.dispose();
     _regionFocus.dispose();
     super.dispose();
   }
@@ -218,6 +288,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       setState(() {
         _book = book;
         _sectionCount = info.sectionCount.toInt();
+        _isPdf = info.format.toLowerCase() == 'pdf';
       });
       await _loadBook(
         start,
@@ -236,10 +307,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     }
   }
 
-  /// Builds one continuous vertical reading stream from every readable spine
-  /// section. Section indexes remain attached to each page for CFI, progress,
-  /// highlights, notes, and bookmarks; they are no longer a user-facing page
-  /// transition boundary.
+  /// Builds a continuous stream from the opening section and lightweight
+  /// placeholders; later sections are prepared when the reader reaches them.
   Future<void> _loadBook(
     int startSection, {
     required int offset,
@@ -251,73 +320,95 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     if (session == null) return;
     setState(() => _loading = true);
     try {
-      final svc = ref.read(readerServiceProvider);
-      final settings = ref.read(readerSettingsProvider);
-      final viewport = MediaQuery.sizeOf(context);
       final pages = <_ContinuousPage>[];
-
-      for (var index = 0; index < _sectionCount; index++) {
-        final content = await svc.getContent(session, index);
-        final blocks = parseSectionHtml(content.html);
-        final highlights = await ref
-            .read(annotationsRepoProvider)
-            .highlightsForSection(widget.bookId, index);
-        final sectionPages = _paginateBlocks(
-          blocks,
-          settings,
-          viewportWidth: viewport.width,
-          viewportHeight: _paginationViewportHeight(viewport.height),
-          engineChars: content.charCount.toInt(),
-        );
-        if (sectionPages.length == 1 && sectionPages.first.blocks.isEmpty) {
-          continue;
+      var preparedSectionIndex = startSection;
+      if (_isPdf) {
+        // Resolve the opening page before building the stream so its extracted
+        // reader pages can occupy separate, fixed-height scroll entries.
+        await _loadPdfSection(startSection);
+        for (var index = 0; index < _sectionCount; index++) {
+          final loaded = _pdfSectionCache[index];
+          pages.addAll(
+            loaded == null
+                ? _pdfPagePlaceholders(index, const [])
+                : _pdfPagePlaceholders(index, loaded.pages),
+          );
         }
-        final section = _ReaderSection(
-          index: index,
-          blocks: blocks,
-          pages: sectionPages,
-          enginePlain: content.plainText,
-          engineChars: content.charCount.toInt(),
-          normalized: _normalize(content.plainText),
-          highlights: highlights,
-        );
-        pages.addAll(
-          sectionPages.map(
-            (page) => _ContinuousPage(section: section, page: page),
-          ),
-        );
+      } else {
+        var openingSection = await _readContinuousSection(startSection);
+        if (_isEmptyContinuousSection(openingSection)) {
+          for (var index = startSection + 1; index < _sectionCount; index++) {
+            openingSection = await _readContinuousSection(index);
+            if (!_isEmptyContinuousSection(openingSection)) break;
+          }
+        }
+        if (_isEmptyContinuousSection(openingSection)) {
+          for (var index = startSection - 1; index >= 0; index--) {
+            openingSection = await _readContinuousSection(index);
+            if (!_isEmptyContinuousSection(openingSection)) break;
+          }
+        }
+        if (_isEmptyContinuousSection(openingSection)) {
+          throw StateError('empty-book');
+        }
+        preparedSectionIndex = openingSection.index;
+        for (var index = 0; index < _sectionCount; index++) {
+          pages.addAll(
+            index == openingSection.index
+                ? _continuousEntriesForSection(openingSection)
+                : [_continuousSectionPlaceholder(index)],
+          );
+        }
       }
 
       if (pages.isEmpty) throw StateError('empty-book');
       var firstForSection = pages.indexWhere(
-        (page) => page.section.index >= startSection,
+        (page) => _isPdf
+            ? page.section.index >= startSection
+            : page.section.index == preparedSectionIndex,
       );
       if (firstForSection < 0) firstForSection = pages.length - 1;
-      final section = pages[firstForSection].section;
-      final pageInSection = progression == null
-          ? _pageForOffset(section.pages, offset)
-          : _pageForProgress(section.pages, progression);
+      final firstEntry = pages[firstForSection];
+      final section = _isPdf
+          ? (_pdfSectionCache[firstEntry.section.index] ?? firstEntry.section)
+          : firstEntry.section;
+      final usesRestoredPosition = section.index == startSection;
+      final effectiveOffset = usesRestoredPosition ? offset : 0;
+      final effectiveProgression = usesRestoredPosition ? progression : null;
+      final pageInSection = effectiveProgression == null
+          ? _pageForOffset(section.pages, effectiveOffset)
+          : _pageForProgress(section.pages, effectiveProgression);
       final target =
           (firstForSection + pageInSection.clamp(0, section.pages.length - 1))
               .clamp(0, pages.length - 1)
               .toInt();
       final active = pages[target];
+      final activeSection = _isPdf
+          ? (_pdfSectionCache[active.section.index] ?? active.section)
+          : active.section;
+      final activePage = _isPdf
+          ? activeSection.pages[active.sectionPageIndex
+                .clamp(0, activeSection.pages.length - 1)
+                .toInt()]
+          : active.page;
 
       if (!mounted) return;
       setState(() {
         _continuousPages = pages;
-        _section = active.section.index;
-        _blocks = active.section.blocks;
-        _pages = active.section.pages;
-        _pageIndex = active.section.pages.indexOf(active.page);
-        _enginePlain = active.section.enginePlain;
-        _engineChars = active.section.engineChars;
-        _normPlain = active.section.normalized.text;
-        _normToOrig = active.section.normalized.map;
-        _highlights = active.section.highlights;
+        _continuousIndex = target;
+        _section = activeSection.index;
+        _blocks = activeSection.blocks;
+        _pages = activeSection.pages;
+        _pageIndex = activeSection.pages.indexOf(activePage);
+        _enginePlain = activeSection.enginePlain;
+        _engineChars = activeSection.engineChars;
+        _normPlain = activeSection.normalized.text;
+        _normToOrig = activeSection.normalized.map;
+        _highlights = activeSection.highlights;
         _pending = null;
         _loading = false;
       });
+      _continuousPageNotifier.value = target;
       _programmaticPageChange = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted || !_scrollController.hasClients) return;
@@ -331,10 +422,15 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       });
 
       if (persistProgress) {
-        await _saveProgress(session, active.section.index, offset);
+        await _saveProgress(session, active.section.index, effectiveOffset);
       }
+      if (_isPdf) _requestPdfWindow(active.section.index);
       if (verifyCfi != null && verifyCfi.isNotEmpty) {
         await _verifyCfi(session, startSection, offset, verifyCfi);
+      }
+      if (_pendingViewportReflow) {
+        _pendingViewportReflow = false;
+        _scheduleViewportReflow();
       }
     } catch (e) {
       if (mounted) {
@@ -342,6 +438,211 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
           _error = '$e';
           _loading = false;
         });
+      }
+      _pendingViewportReflow = false;
+    }
+  }
+
+  Future<_ReaderSection> _readContinuousSection(int index) async {
+    final session = _session;
+    if (session == null) throw StateError('reader-closed');
+    final svc = ref.read(readerServiceProvider);
+    final settings = ref.read(readerSettingsProvider);
+    final viewport = MediaQuery.sizeOf(context);
+    final content = await svc.getContent(session, index);
+    if (!mounted) throw StateError('reader-closed');
+    final blocks = _parseReaderBlocks(content);
+    final highlights = await ref
+        .read(annotationsRepoProvider)
+        .highlightsForSection(widget.bookId, index);
+    final sectionPages = _paginateBlocks(
+      blocks,
+      settings,
+      viewportWidth: viewport.width,
+      viewportHeight: _paginationViewportHeight(viewport.height),
+      engineChars: content.charCount.toInt(),
+    );
+    return _ReaderSection(
+      index: index,
+      blocks: blocks,
+      pages: sectionPages,
+      enginePlain: content.plainText,
+      engineChars: content.charCount.toInt(),
+      normalized: _normalize(content.plainText),
+      highlights: highlights,
+    );
+  }
+
+  bool _isEmptyContinuousSection(_ReaderSection section) =>
+      section.pages.length == 1 && section.pages.first.blocks.isEmpty;
+
+  List<ReaderBlock> _parseReaderBlocks(reader_dto.SectionContent content) {
+    final images = [
+      for (final image in content.images)
+        ReaderImage(
+          source: image.source,
+          mimeType: image.mimeType,
+          data: image.data,
+          pixelWidth: image.pixelWidth,
+          pixelHeight: image.pixelHeight,
+          dataFormat: image.dataFormat,
+          left: image.left,
+          top: image.top,
+          displayWidth: image.displayWidth,
+          displayHeight: image.displayHeight,
+          pageWidth: image.pageWidth,
+          pageHeight: image.pageHeight,
+          rotationDegrees: image.rotationDegrees,
+        ),
+    ];
+    return parseSectionHtml(content.html, images: images);
+  }
+
+  List<_ContinuousPage> _continuousEntriesForSection(_ReaderSection section) =>
+      [
+        for (var index = 0; index < section.pages.length; index++)
+          _ContinuousPage(
+            section: section,
+            page: section.pages[index],
+            sectionPageIndex: index,
+          ),
+      ];
+
+  _ContinuousPage _continuousSectionPlaceholder(int index) {
+    final section = _ReaderSection(
+      index: index,
+      blocks: const [],
+      pages: const [_ReaderPage(blocks: [], startOffset: 0)],
+      enginePlain: '',
+      engineChars: 0,
+      normalized: _Normalized('', const []),
+      highlights: const [],
+      isPlaceholder: true,
+    );
+    return _ContinuousPage(
+      section: section,
+      page: section.pages.first,
+      sectionPageIndex: 0,
+    );
+  }
+
+  void _requestContinuousSection(int index, {bool retry = false}) {
+    if (_isPdf || index < 0 || index >= _sectionCount || !mounted) return;
+    final hasPlaceholder = _continuousPages.any(
+      (page) => page.section.index == index && page.section.isPlaceholder,
+    );
+    if (!hasPlaceholder) return;
+    if (!_loadingContinuousSections.contains(index) || retry) {
+      setState(() {
+        _loadingContinuousSections.add(index);
+        _continuousSectionErrors.remove(index);
+      });
+    }
+    _continuousSectionRequestedIndex = index;
+    if (_continuousSectionLoadWorker != null) return;
+    _continuousSectionLoadWorker = _drainContinuousSectionRequests()
+        .whenComplete(() {
+          _continuousSectionLoadWorker = null;
+          final pending = _continuousSectionRequestedIndex;
+          if (mounted && pending != null) {
+            _requestContinuousSection(pending);
+          }
+        });
+  }
+
+  Future<void> _drainContinuousSectionRequests() async {
+    while (mounted && _continuousSectionRequestedIndex != null) {
+      final index = _continuousSectionRequestedIndex!;
+      _continuousSectionRequestedIndex = null;
+      try {
+        await _loadContinuousSection(index);
+      } catch (error) {
+        if (mounted) {
+          setState(() {
+            _loadingContinuousSections.remove(index);
+            _continuousSectionErrors[index] = error;
+          });
+        }
+      }
+    }
+  }
+
+  Future<void> _loadContinuousSection(int index) async {
+    final firstIndex = _continuousPages.indexWhere(
+      (page) => page.section.index == index && page.section.isPlaceholder,
+    );
+    if (firstIndex < 0) {
+      _loadingContinuousSections.remove(index);
+      return;
+    }
+    final section = await _readContinuousSection(index);
+    if (!mounted) return;
+    var endIndex = firstIndex;
+    while (endIndex < _continuousPages.length &&
+        _continuousPages[endIndex].section.index == index) {
+      endIndex++;
+    }
+    final active =
+        _continuousIndex >= 0 && _continuousIndex < _continuousPages.length
+        ? _continuousPages[_continuousIndex]
+        : null;
+    final replacement = _continuousEntriesForSection(section);
+    final delta = replacement.length - (endIndex - firstIndex);
+    var currentIndex = _continuousIndex;
+    if (active?.section.index == index) {
+      currentIndex =
+          firstIndex +
+          active!.sectionPageIndex.clamp(0, replacement.length - 1);
+    } else if (currentIndex >= endIndex) {
+      currentIndex += delta;
+    }
+    final pages = [
+      ..._continuousPages.take(firstIndex),
+      ...replacement,
+      ..._continuousPages.skip(endIndex),
+    ];
+    final current = currentIndex >= 0 && currentIndex < pages.length
+        ? pages[currentIndex]
+        : null;
+    final shouldReposition = currentIndex != _continuousIndex;
+    if (shouldReposition) _programmaticPageChange = true;
+    setState(() {
+      _continuousPages = pages;
+      _continuousIndex = currentIndex;
+      _loadingContinuousSections.remove(index);
+      _continuousSectionErrors.remove(index);
+      if (current != null && !current.section.isPlaceholder) {
+        final currentSection = current.section;
+        _section = currentSection.index;
+        _blocks = currentSection.blocks;
+        _pages = currentSection.pages;
+        _pageIndex = currentSection.pages
+            .indexOf(current.page)
+            .clamp(0, currentSection.pages.length - 1)
+            .toInt();
+        _enginePlain = currentSection.enginePlain;
+        _engineChars = currentSection.engineChars;
+        _normPlain = currentSection.normalized.text;
+        _normToOrig = currentSection.normalized.map;
+        _highlights = currentSection.highlights;
+      }
+    });
+    _continuousPageNotifier.value = currentIndex;
+    if (shouldReposition) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_scrollController.hasClients) return;
+        _scrollController.jumpTo(
+          (currentIndex * _readerPageExtent)
+              .clamp(0.0, _scrollController.position.maxScrollExtent)
+              .toDouble(),
+        );
+        _programmaticPageChange = false;
+      });
+    }
+    if (active?.section.index == index && current != null) {
+      final session = _session;
+      if (session != null) {
+        _queueProgressSave(session, index, current.page.startOffset);
       }
     }
   }
@@ -361,7 +662,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     try {
       final svc = ref.read(readerServiceProvider);
       final content = await svc.getContent(session, index);
-      final blocks = parseSectionHtml(content.html);
+      final blocks = _parseReaderBlocks(content);
       final highlights = await ref
           .read(annotationsRepoProvider)
           .highlightsForSection(widget.bookId, index);
@@ -436,6 +737,206 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
 
   double get _readerPageExtent => MediaQuery.sizeOf(context).height;
 
+  _ReaderSection _emptyPdfSection(int index) => _ReaderSection(
+    index: index,
+    blocks: const [],
+    pages: const [_ReaderPage(blocks: [], startOffset: 0)],
+    enginePlain: '',
+    engineChars: 0,
+    normalized: _Normalized('', const []),
+    highlights: const [],
+  );
+
+  List<_ContinuousPage> _pdfPagePlaceholders(
+    int sectionIndex,
+    List<_ReaderPage> extractedPages,
+  ) {
+    final emptySection = _emptyPdfSection(sectionIndex);
+    final pageCount = math.max(1, extractedPages.length);
+    return [
+      for (var pageIndex = 0; pageIndex < pageCount; pageIndex++)
+        _ContinuousPage(
+          section: emptySection,
+          page: _ReaderPage(
+            blocks: const [],
+            startOffset: extractedPages.isEmpty
+                ? 0
+                : extractedPages[pageIndex].startOffset,
+          ),
+          sectionPageIndex: pageIndex,
+        ),
+    ];
+  }
+
+  Future<_ReaderSection> _readPdfSection(int index) async {
+    final session = _session;
+    if (session == null) throw StateError('reader-closed');
+    final viewport = MediaQuery.sizeOf(context);
+    final settings = ref.read(readerSettingsProvider);
+    final content = await _readerSvc.getContent(session, index);
+    final blocks = _parseReaderBlocks(content);
+    final highlights = await ref
+        .read(annotationsRepoProvider)
+        .highlightsForSection(widget.bookId, index);
+    final normalized = _normalize(content.plainText);
+    final pages = _paginateBlocks(
+      blocks,
+      settings,
+      viewportWidth: viewport.width,
+      viewportHeight: _paginationViewportHeight(viewport.height),
+      engineChars: content.charCount.toInt(),
+    );
+    final section = _ReaderSection(
+      index: index,
+      blocks: blocks,
+      pages: pages,
+      enginePlain: content.plainText,
+      engineChars: content.charCount.toInt(),
+      normalized: normalized,
+      highlights: highlights,
+    );
+    return section;
+  }
+
+  Future<void> _loadPdfSection(int index) async {
+    final cached = _pdfSectionCache.remove(index);
+    if (cached != null) {
+      _pdfSectionCache[index] = cached;
+      return;
+    }
+    if (_pdfSectionErrors.remove(index) != null && mounted) {
+      setState(() {});
+    }
+    try {
+      final section = await _readPdfSection(index);
+      if (!mounted) return;
+      _pdfSectionCache[index] = section;
+      _pdfSectionErrors.remove(index);
+      while (_pdfSectionCache.length > 3) {
+        final oldest = _pdfSectionCache.keys.firstWhere(
+          (key) =>
+              key !=
+              (_continuousIndex >= 0 &&
+                      _continuousIndex < _continuousPages.length
+                  ? _continuousPages[_continuousIndex].section.index
+                  : -1),
+          orElse: () => _pdfSectionCache.keys.first,
+        );
+        _pdfSectionCache.remove(oldest);
+      }
+
+      final firstContinuousIndex = _continuousPages.indexWhere(
+        (page) => page.section.index == index,
+      );
+      var updatedPages = _continuousPages;
+      var updatedCurrentIndex = _continuousIndex;
+      var shouldReposition = false;
+      if (firstContinuousIndex >= 0) {
+        var endContinuousIndex = firstContinuousIndex;
+        while (endContinuousIndex < _continuousPages.length &&
+            _continuousPages[endContinuousIndex].section.index == index) {
+          endContinuousIndex++;
+        }
+        final oldCount = endContinuousIndex - firstContinuousIndex;
+        final replacement = _pdfPagePlaceholders(index, section.pages);
+        final delta = replacement.length - oldCount;
+        final active =
+            _continuousIndex >= 0 && _continuousIndex < _continuousPages.length
+            ? _continuousPages[_continuousIndex]
+            : null;
+        if (active?.section.index == index) {
+          updatedCurrentIndex =
+              firstContinuousIndex +
+              active!.sectionPageIndex.clamp(0, replacement.length - 1);
+        } else if (_continuousIndex >= endContinuousIndex) {
+          updatedCurrentIndex += delta;
+        }
+        shouldReposition = updatedCurrentIndex != _continuousIndex;
+        updatedPages = [
+          ..._continuousPages.take(firstContinuousIndex),
+          ...replacement,
+          ..._continuousPages.skip(endContinuousIndex),
+        ];
+      }
+
+      final current =
+          updatedCurrentIndex >= 0 && updatedCurrentIndex < updatedPages.length
+          ? updatedPages[updatedCurrentIndex]
+          : null;
+      final activeSection = current == null
+          ? null
+          : (_pdfSectionCache[current.section.index] ?? current.section);
+      final activePageIndex = activeSection == null
+          ? 0
+          : current!.sectionPageIndex
+                .clamp(0, activeSection.pages.length - 1)
+                .toInt();
+      if (shouldReposition) _programmaticPageChange = true;
+      setState(() {
+        _continuousPages = updatedPages;
+        _continuousIndex = updatedCurrentIndex;
+        if (current != null && activeSection != null) {
+          _section = activeSection.index;
+          _blocks = activeSection.blocks;
+          _pages = activeSection.pages;
+          _pageIndex = activePageIndex;
+          _enginePlain = activeSection.enginePlain;
+          _engineChars = activeSection.engineChars;
+          _normPlain = activeSection.normalized.text;
+          _normToOrig = activeSection.normalized.map;
+          _highlights = activeSection.highlights;
+        }
+      });
+      _continuousPageNotifier.value = updatedCurrentIndex;
+      if (shouldReposition) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || !_scrollController.hasClients) return;
+          _scrollController.jumpTo(
+            (updatedCurrentIndex * _readerPageExtent)
+                .clamp(0.0, _scrollController.position.maxScrollExtent)
+                .toDouble(),
+          );
+          _programmaticPageChange = false;
+        });
+      }
+    } catch (error) {
+      if (mounted) setState(() => _pdfSectionErrors[index] = error);
+      rethrow;
+    }
+  }
+
+  void _requestPdfWindow(int index) {
+    _pdfRequestedIndex = index.clamp(0, _sectionCount - 1);
+    if (_pdfLoadWorker != null) return;
+    _pdfLoadWorker = _drainPdfRequests().whenComplete(() {
+      _pdfLoadWorker = null;
+      if (mounted && _pdfRequestedIndex != null) {
+        _requestPdfWindow(_pdfRequestedIndex!);
+      }
+    });
+  }
+
+  Future<void> _drainPdfRequests() async {
+    while (mounted && _pdfRequestedIndex != null) {
+      final target = _pdfRequestedIndex!;
+      _pdfRequestedIndex = null;
+      for (final index in [
+        target,
+        target + _pdfPrefetchDirection,
+        target - _pdfPrefetchDirection,
+      ]) {
+        if (index < 0 || index >= _sectionCount) continue;
+        if (_pdfSectionCache.containsKey(index)) continue;
+        try {
+          await _loadPdfSection(index);
+        } catch (_) {
+          // A failed or stale prefetch must not interrupt reading.
+        }
+        if (_pdfRequestedIndex != null) break;
+      }
+    }
+  }
+
   void _onContinuousScroll() {
     if (!mounted || !_scrollController.hasClients || _continuousPages.isEmpty) {
       return;
@@ -448,24 +949,82 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         .toInt();
     if (index == _continuousIndex) return;
     final active = _continuousPages[index];
-    setState(() {
+    if (!_isPdf && active.section.isPlaceholder) {
       _continuousIndex = index;
-      _section = active.section.index;
-      _blocks = active.section.blocks;
-      _pages = active.section.pages;
-      _pageIndex = active.section.pages.indexOf(active.page);
-      _enginePlain = active.section.enginePlain;
-      _engineChars = active.section.engineChars;
-      _normPlain = active.section.normalized.text;
-      _normToOrig = active.section.normalized.map;
-      _highlights = active.section.highlights;
-      _pending = null;
-    });
+      _continuousPageNotifier.value = index;
+      if (_pending != null) setState(() => _pending = null);
+      _requestContinuousSection(active.section.index);
+      return;
+    }
+    if (_isPdf) {
+      _pdfPrefetchDirection = index > _continuousIndex ? 1 : -1;
+      _requestPdfWindow(active.section.index);
+    }
+    final resolvedSection = _isPdf
+        ? (_pdfSectionCache[active.section.index] ?? active.section)
+        : active.section;
+    final sectionChanged = _section != resolvedSection.index;
+    final clearSelection = _pending != null;
+    _continuousIndex = index;
+    _pageIndex = _isPdf
+        ? active.sectionPageIndex
+              .clamp(0, resolvedSection.pages.length - 1)
+              .toInt()
+        : resolvedSection.pages.indexOf(active.page);
+    if (_pageIndex < 0) _pageIndex = 0;
+    if (sectionChanged || clearSelection) {
+      setState(() {
+        _section = resolvedSection.index;
+        _blocks = resolvedSection.blocks;
+        _pages = resolvedSection.pages;
+        _enginePlain = resolvedSection.enginePlain;
+        _engineChars = resolvedSection.engineChars;
+        _normPlain = resolvedSection.normalized.text;
+        _normToOrig = resolvedSection.normalized.map;
+        _highlights = resolvedSection.highlights;
+        _pending = null;
+      });
+    }
+    _continuousPageNotifier.value = index;
     if (_programmaticPageChange) return;
     final session = _session;
     if (session != null) {
-      _saveProgress(session, active.section.index, active.page.startOffset);
+      _queueProgressSave(
+        session,
+        active.section.index,
+        _isPdf ? 0 : active.page.startOffset,
+      );
     }
+  }
+
+  void _queueProgressSave(ReaderSession session, int section, int offset) {
+    _pendingProgressSave = _PendingProgressSave(session, section, offset);
+    _progressSaveTimer?.cancel();
+    _progressSaveTimer = Timer(const Duration(milliseconds: 300), () {
+      _drainProgressSave();
+    });
+  }
+
+  void _drainProgressSave() {
+    _progressSaveTimer?.cancel();
+    _progressSaveTimer = null;
+    final pending = _pendingProgressSave;
+    _pendingProgressSave = null;
+    if (pending == null) return;
+    _progressSaveTail = _progressSaveTail.then(
+      (_) => _saveProgress(pending.session, pending.section, pending.offset),
+    );
+  }
+
+  Future<void> _closeSessionAfterSavingProgress(ReaderSession session) async {
+    _progressSaveTimer?.cancel();
+    final pending = _pendingProgressSave;
+    _pendingProgressSave = null;
+    await _progressSaveTail;
+    if (pending != null) {
+      await _saveProgress(pending.session, pending.section, pending.offset);
+    }
+    await _readerSvc.closeSession(session);
   }
 
   Future<void> _jumpToSection(int sectionIndex) async {
@@ -501,8 +1060,10 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       index += direction
     ) {
       final content = await svc.getContent(session, index);
-      final blocks = parseSectionHtml(content.html);
-      if (blocks.any((block) => block.plainText.trim().isNotEmpty)) {
+      final blocks = _parseReaderBlocks(content);
+      if (blocks.any(
+        (block) => block is ImageBlock || block.plainText.trim().isNotEmpty,
+      )) {
         return index;
       }
     }
@@ -515,24 +1076,21 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     int offset,
   ) async {
     try {
-      final svc = ref.read(readerServiceProvider);
-      final p = await svc.getProgress(session, section, offset);
-      await ref
-          .read(progressRepoProvider)
-          .saveProgress(
-            bookId: widget.bookId,
-            locatorJson: p.locatorJson,
-            sectionIndex: section,
-            charOffset: offset,
-            progression: p.totalProgression,
-          );
+      final p = await _readerSvc.getProgress(session, section, offset);
+      await _progressRepo.saveProgress(
+        bookId: widget.bookId,
+        locatorJson: p.locatorJson,
+        sectionIndex: section,
+        charOffset: offset,
+        progression: p.totalProgression,
+      );
     } catch (_) {
       // Progress is best-effort per navigation; the book stays readable.
     }
   }
 
   List<_ReaderPage> _paginateBlocks(
-    List<TextBlock> blocks,
+    List<ReaderBlock> blocks,
     ReaderSettingsData settings, {
     required double viewportWidth,
     required double viewportHeight,
@@ -551,7 +1109,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       (total, block) => total + block.plainText.length,
     );
     final rawPages = <_RawReaderPage>[];
-    final current = <TextBlock>[];
+    final current = <ReaderBlock>[];
     var used = 0.0;
     var currentStart = 0;
     var parsedCursor = 0;
@@ -564,14 +1122,22 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     }
 
     for (final block in blocks) {
-      final text = block.plainText;
+      if (block is ImageBlock) {
+        flush();
+        if (block.images.isNotEmpty) {
+          rawPages.add(_RawReaderPage([block], parsedCursor));
+        }
+        continue;
+      }
+      final textBlock = block as TextBlock;
+      final text = textBlock.plainText;
       if (text.isEmpty) continue;
       var cursor = 0;
       while (cursor < text.length) {
         final spacing = current.isEmpty ? 0.0 : 12.0;
         final available = height - used - spacing;
         final end = _fitEnd(
-          block,
+          textBlock,
           cursor,
           width,
           math.max(1.0, available).toDouble(),
@@ -588,14 +1154,15 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
           // moving and let the page clip only that unavoidable glyph.
           currentStart = parsedCursor + cursor;
           final forcedEnd = math.min(cursor + 1, text.length);
-          current.add(_sliceBlock(block, cursor, forcedEnd));
-          used = _measureBlock(current.single, width, settings, align);
+          final piece = _sliceBlock(textBlock, cursor, forcedEnd);
+          current.add(piece);
+          used = _measureBlock(piece, width, settings, align);
           cursor = forcedEnd;
           if (cursor < text.length) flush();
           continue;
         }
         if (current.isEmpty) currentStart = parsedCursor + cursor;
-        final piece = _sliceBlock(block, cursor, end);
+        final piece = _sliceBlock(textBlock, cursor, end);
         current.add(piece);
         used += spacing + _measureBlock(piece, width, settings, align);
         cursor = end;
@@ -849,6 +1416,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       if (mounted) {
         setState(() {
           _highlights = fresh;
+          _replaceCachedSectionHighlights(_section, fresh);
           _pending = null;
           _saving = false;
         });
@@ -856,6 +1424,38 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     } catch (_) {
       if (mounted) setState(() => _saving = false);
     }
+  }
+
+  void _replaceCachedSectionHighlights(
+    int sectionIndex,
+    List<HighlightRecord> highlights,
+  ) {
+    if (_isPdf) {
+      final cached = _pdfSectionCache[sectionIndex];
+      if (cached != null) {
+        _pdfSectionCache[sectionIndex] = cached.copyWithHighlights(highlights);
+      }
+      return;
+    }
+    final firstIndex = _continuousPages.indexWhere(
+      (page) =>
+          page.section.index == sectionIndex && !page.section.isPlaceholder,
+    );
+    if (firstIndex < 0) return;
+    final section = _continuousPages[firstIndex].section.copyWithHighlights(
+      highlights,
+    );
+    _continuousPages = [
+      for (final page in _continuousPages)
+        if (page.section.index == sectionIndex && !page.section.isPlaceholder)
+          _ContinuousPage(
+            section: section,
+            page: page.page,
+            sectionPageIndex: page.sectionPageIndex,
+          )
+        else
+          page,
+    ];
   }
 
   void _cancelPending() {
@@ -952,7 +1552,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     if (content == null || content.isEmpty) return;
     try {
       final svc = ref.read(readerServiceProvider);
-      final offset = pending?.start ?? 0;
+      final offset = pending?.start ?? _currentPageOffset;
       final locator = await svc.getLocator(session, _section, offset);
       await ref
           .read(annotationsRepoProvider)
@@ -1155,6 +1755,16 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         : _pages[_pageIndex.clamp(0, _pages.length - 1).toInt()].startOffset;
   }
 
+  int _displayContinuousPageIndex(int index) {
+    if (_isPdf && index >= 0 && index < _continuousPages.length) {
+      return _continuousPages[index].section.index;
+    }
+    return index;
+  }
+
+  int get _displayContinuousPageCount =>
+      _isPdf ? _sectionCount : _continuousPages.length;
+
   void _scheduleControlsHide() {
     _controlsTimer?.cancel();
     _controlsTimer = Timer(const Duration(seconds: 3), () {
@@ -1263,7 +1873,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                   child: _highlightBar(locale, colors),
                 ),
               _readerTopControls(locale, colors),
-              _readerBottomControls(locale, colors),
+              if (_pending == null) _readerBottomControls(locale, colors),
             ],
           ),
         ),
@@ -1277,7 +1887,12 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     ReaderThemeColors colors,
   ) {
     if (_loading && _pages.isEmpty) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(
+        child: CircularProgressIndicator(
+          color: CodarColors.gold,
+          strokeWidth: 2.5,
+        ),
+      );
     }
     if (_error != null && _pages.isEmpty) {
       return Center(
@@ -1319,6 +1934,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       return ListView.builder(
         controller: _scrollController,
         padding: EdgeInsets.zero,
+        itemExtent: _readerPageExtent,
+        scrollCacheExtent: const ScrollCacheExtent.viewport(1),
         itemCount: _continuousPages.length,
         itemBuilder: (context, i) => _buildContinuousPage(
           _continuousPages[i],
@@ -1391,11 +2008,98 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     double margin,
     TextAlign align,
   ) {
-    final page = entry.page;
-    final section = entry.section;
+    if (_isPdf && !_pdfSectionCache.containsKey(entry.section.index)) {
+      final error = _pdfSectionErrors[entry.section.index];
+      return SizedBox(
+        height: _readerPageExtent,
+        child: Center(
+          child: error == null
+              ? const CircularProgressIndicator(
+                  color: CodarColors.gold,
+                  strokeWidth: 2.5,
+                )
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      '${tr(locale, 'errorPrefix')}: '
+                      '${_displayError('$error', locale)}',
+                    ),
+                    const SizedBox(height: 8),
+                    FilledButton.tonal(
+                      onPressed: () => _requestPdfWindow(entry.section.index),
+                      child: Text(tr(locale, 'retry')),
+                    ),
+                  ],
+                ),
+        ),
+      );
+    }
+    if (entry.section.isPlaceholder) {
+      final error = _continuousSectionErrors[entry.section.index];
+      return SizedBox(
+        height: _readerPageExtent,
+        child: Center(
+          child: error == null
+              ? (_loadingContinuousSections.contains(entry.section.index)
+                    ? const CircularProgressIndicator(
+                        color: CodarColors.gold,
+                        strokeWidth: 2.5,
+                      )
+                    : const SizedBox.shrink())
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      '${tr(locale, 'errorPrefix')}: '
+                      '${_displayError('$error', locale)}',
+                    ),
+                    const SizedBox(height: 8),
+                    FilledButton.tonal(
+                      onPressed: () => _requestContinuousSection(
+                        entry.section.index,
+                        retry: true,
+                      ),
+                      child: Text(tr(locale, 'retry')),
+                    ),
+                  ],
+                ),
+        ),
+      );
+    }
+    final section = _isPdf
+        ? (_pdfSectionCache[entry.section.index] ?? entry.section)
+        : entry.section;
+    final page = _isPdf && entry.sectionPageIndex < section.pages.length
+        ? section.pages[entry.sectionPageIndex]
+        : entry.page;
+    final contentBlocks = page.blocks;
+    final contentColumn = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (var j = 0; j < contentBlocks.length; j++)
+          Padding(
+            padding: EdgeInsets.only(
+              bottom: j == contentBlocks.length - 1 ? 0 : 12,
+            ),
+            child: _blockText(
+              contentBlocks[j],
+              settings,
+              colors,
+              align,
+              highlights: section.highlights,
+              engineChars: section.engineChars,
+            ),
+          ),
+      ],
+    );
     return Semantics(
-      label:
-          '${tr(locale, 'pageOf')} ${index + 1} / ${_continuousPages.length}',
+      key: ValueKey(
+        'reader-page-${entry.section.index}-${entry.sectionPageIndex}',
+      ),
+      label: _isPdf
+          ? '${tr(locale, 'pageOf')} ${entry.section.index + 1} / $_sectionCount'
+          : '${tr(locale, 'pageOf')} ${index + 1} / ${_continuousPages.length}',
       child: SizedBox(
         height: _readerPageExtent,
         child: Padding(
@@ -1410,30 +2114,12 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
             focusNode: index == _continuousIndex ? _regionFocus : null,
             selectionControls: MaterialTextSelectionControls(),
             onSelectionChanged: _onSelectionChanged,
-            child: page.blocks.isEmpty
+            child: contentBlocks.isEmpty
                 ? Text(
                     tr(locale, 'emptySection'),
                     style: TextStyle(color: colors.weak),
                   )
-                : Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      for (var j = 0; j < page.blocks.length; j++)
-                        Padding(
-                          padding: EdgeInsets.only(
-                            bottom: j == page.blocks.length - 1 ? 0 : 12,
-                          ),
-                          child: _blockText(
-                            page.blocks[j],
-                            settings,
-                            colors,
-                            align,
-                            highlights: section.highlights,
-                            engineChars: section.engineChars,
-                          ),
-                        ),
-                    ],
-                  ),
+                : contentColumn,
           ),
         ),
       ),
@@ -1441,22 +2127,25 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   }
 
   Widget _blockText(
-    TextBlock block,
+    ReaderBlock block,
     ReaderSettingsData settings,
     ReaderThemeColors colors,
     TextAlign align, {
     List<HighlightRecord>? highlights,
     int? engineChars,
   }) {
-    final base = _styleForBlock(block, settings, colors.text);
+    if (block is ImageBlock) return _readerImageBlock(block);
+    if (block is! TextBlock) return const SizedBox.shrink();
+    final textBlock = block;
+    final base = _styleForBlock(textBlock, settings, colors.text);
     final spans = _spansFor(
-      block,
+      textBlock,
       base,
       highlights: highlights,
       engineChars: engineChars,
     );
     final style = base;
-    final prefix = block.kind == 'li' ? '• ' : '';
+    final prefix = textBlock.kind == 'li' ? '• ' : '';
     return Text.rich(
       TextSpan(
         children: [
@@ -1474,6 +2163,72 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         ],
       ),
       textAlign: align,
+    );
+  }
+
+  Widget _readerImageBlock(ImageBlock block) {
+    if (block.images.isEmpty) return const SizedBox.shrink();
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final screen = MediaQuery.sizeOf(context);
+        final maxWidth = constraints.maxWidth.isFinite
+            ? constraints.maxWidth
+            : screen.width;
+        final maxHeight = math.max(
+          120.0,
+          screen.height - _pageTopPadding - _pageBottomPadding,
+        );
+        if (!block.isPdfPage) {
+          return Center(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: maxWidth,
+                maxHeight: maxHeight,
+              ),
+              child: ReaderImageView(
+                image: block.images.first,
+                fit: BoxFit.contain,
+              ),
+            ),
+          );
+        }
+
+        final first = block.images.first;
+        final pageWidth = first.pageWidth;
+        final pageHeight = first.pageHeight;
+        if (pageWidth <= 0 || pageHeight <= 0) {
+          return ReaderImageView(image: first, fit: BoxFit.contain);
+        }
+        final pageRatio = pageWidth / pageHeight;
+        final width = math.min(maxWidth, maxHeight * pageRatio);
+        final height = width / pageRatio;
+        final scaleX = width / pageWidth;
+        final scaleY = height / pageHeight;
+        return Center(
+          child: SizedBox(
+            width: width,
+            height: height,
+            child: Stack(
+              clipBehavior: Clip.hardEdge,
+              children: [
+                for (final image in block.images)
+                  if (image.displayWidth > 0 && image.displayHeight > 0)
+                    Positioned(
+                      left: (image.left * scaleX).clamp(0.0, width),
+                      top: (image.top * scaleY).clamp(0.0, height),
+                      width: (image.displayWidth * scaleX).clamp(0.0, width),
+                      height: (image.displayHeight * scaleY).clamp(0.0, height),
+                      child: RotatedBox(
+                        quarterTurns:
+                            ((image.rotationDegrees ~/ 90) % 4 + 4) % 4,
+                        child: ReaderImageView(image: image, fit: BoxFit.fill),
+                      ),
+                    ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -1672,24 +2427,32 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                         ),
                       ),
                     ),
-                    Semantics(
-                      label: tr(locale, 'pageOf'),
-                      value: _continuousPages.isEmpty
-                          ? tr(locale, 'loading')
-                          : '${_continuousIndex + 1} / ${_continuousPages.length}',
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 4),
-                        child: Text(
-                          _continuousPages.isEmpty
-                              ? '—'
-                              : '${_continuousIndex + 1} / ${_continuousPages.length}',
-                          style: TextStyle(
-                            color: colors.text,
-                            fontSize: 11,
-                            fontWeight: FontWeight.w800,
+                    ValueListenableBuilder<int>(
+                      valueListenable: _continuousPageNotifier,
+                      builder: (context, pageIndex, _) {
+                        final displayIndex = _displayContinuousPageIndex(
+                          pageIndex,
+                        );
+                        final displayCount = _displayContinuousPageCount;
+                        final value = '${displayIndex + 1} / $displayCount';
+                        return Semantics(
+                          label: tr(locale, 'pageOf'),
+                          value: _continuousPages.isEmpty
+                              ? tr(locale, 'loading')
+                              : '${displayIndex + 1} / $displayCount',
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 4),
+                            child: Text(
+                              _continuousPages.isEmpty ? '—' : value,
+                              style: TextStyle(
+                                color: colors.text,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
                           ),
-                        ),
-                      ),
+                        );
+                      },
                     ),
                     IconButton(
                       tooltip: tr(locale, 'readerSettings'),
@@ -1752,8 +2515,6 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     final total = _continuousPages.isNotEmpty
         ? _continuousPages.length
         : _pages.length;
-    final current = _continuousPages.isNotEmpty ? _continuousIndex : _pageIndex;
-    final progress = total <= 1 ? 0.0 : current / (total - 1);
     return Positioned(
       left: 0,
       right: 0,
@@ -1777,68 +2538,94 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                   ],
                 ),
               ),
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 18, 12, 2),
-                child: Row(
-                  children: [
-                    IconButton(
-                      tooltip: tr(locale, 'previousPage'),
-                      color: colors.text,
-                      icon: const Icon(Icons.keyboard_arrow_up_rounded),
-                      onPressed: current > 0
-                          ? () => _continuousPages.isNotEmpty
-                                ? _scrollToContinuousIndex(current - 1)
-                                : _pageController.previousPage(
-                                    duration: const Duration(milliseconds: 180),
-                                    curve: Curves.easeOut,
-                                  )
-                          : null,
-                    ),
-                    Expanded(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 180),
-                            child: LinearProgressIndicator(
-                              value: progress,
-                              minHeight: 2,
-                              color: colors.text,
-                              backgroundColor: colors.weak.withValues(
-                                alpha: 0.22,
+              child: ValueListenableBuilder<int>(
+                valueListenable: _continuousPageNotifier,
+                builder: (context, pageIndex, _) {
+                  final current = _continuousPages.isNotEmpty
+                      ? pageIndex
+                      : _pageIndex;
+                  final displayCurrent = _continuousPages.isNotEmpty
+                      ? _displayContinuousPageIndex(pageIndex)
+                      : _pageIndex;
+                  final displayTotal = _continuousPages.isNotEmpty
+                      ? _displayContinuousPageCount
+                      : total;
+                  final progress = displayTotal <= 1
+                      ? 0.0
+                      : displayCurrent / (displayTotal - 1);
+                  final positionLabel =
+                      '${tr(locale, 'sectionOf')} ${_section + 1} / $_sectionCount · '
+                      '${tr(locale, 'pageOf')} ${displayCurrent + 1} / $displayTotal';
+                  return Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 18, 12, 2),
+                    child: Row(
+                      children: [
+                        IconButton(
+                          tooltip: tr(locale, 'previousPage'),
+                          color: colors.text,
+                          icon: const Icon(Icons.keyboard_arrow_up_rounded),
+                          onPressed: current > 0
+                              ? () => _continuousPages.isNotEmpty
+                                    ? _scrollToContinuousIndex(current - 1)
+                                    : _pageController.previousPage(
+                                        duration: const Duration(
+                                          milliseconds: 180,
+                                        ),
+                                        curve: Curves.easeOut,
+                                      )
+                              : null,
+                        ),
+                        Expanded(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              ConstrainedBox(
+                                constraints: const BoxConstraints(
+                                  maxWidth: 180,
+                                ),
+                                child: LinearProgressIndicator(
+                                  value: progress,
+                                  minHeight: 2,
+                                  color: colors.text,
+                                  backgroundColor: colors.weak.withValues(
+                                    alpha: 0.22,
+                                  ),
+                                ),
                               ),
-                            ),
+                              const SizedBox(height: 6),
+                              Text(
+                                total == 0
+                                    ? tr(locale, 'loading')
+                                    : positionLabel,
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  color: colors.weak,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
                           ),
-                          const SizedBox(height: 6),
-                          Text(
-                            total == 0
-                                ? tr(locale, 'loading')
-                                : '${current + 1} / $total',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              color: colors.weak,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ],
-                      ),
+                        ),
+                        IconButton(
+                          tooltip: tr(locale, 'nextPage'),
+                          color: colors.text,
+                          icon: const Icon(Icons.keyboard_arrow_down_rounded),
+                          onPressed: current < total - 1
+                              ? () => _continuousPages.isNotEmpty
+                                    ? _scrollToContinuousIndex(current + 1)
+                                    : _pageController.nextPage(
+                                        duration: const Duration(
+                                          milliseconds: 180,
+                                        ),
+                                        curve: Curves.easeOut,
+                                      )
+                              : null,
+                        ),
+                      ],
                     ),
-                    IconButton(
-                      tooltip: tr(locale, 'nextPage'),
-                      color: colors.text,
-                      icon: const Icon(Icons.keyboard_arrow_down_rounded),
-                      onPressed: current < total - 1
-                          ? () => _continuousPages.isNotEmpty
-                                ? _scrollToContinuousIndex(current + 1)
-                                : _pageController.nextPage(
-                                    duration: const Duration(milliseconds: 180),
-                                    curve: Curves.easeOut,
-                                  )
-                          : null,
-                    ),
-                  ],
-                ),
+                  );
+                },
               ),
             ),
           ),
@@ -1991,13 +2778,13 @@ class _ReaderSliderRow extends StatelessWidget {
 
 class _RawReaderPage {
   _RawReaderPage(this.blocks, this.start);
-  final List<TextBlock> blocks;
+  final List<ReaderBlock> blocks;
   final int start;
 }
 
 class _ReaderPage {
   const _ReaderPage({required this.blocks, required this.startOffset});
-  final List<TextBlock> blocks;
+  final List<ReaderBlock> blocks;
   final int startOffset;
 }
 
@@ -2010,22 +2797,41 @@ class _ReaderSection {
     required this.engineChars,
     required this.normalized,
     required this.highlights,
+    this.isPlaceholder = false,
   });
 
   final int index;
-  final List<TextBlock> blocks;
+  final List<ReaderBlock> blocks;
   final List<_ReaderPage> pages;
   final String enginePlain;
   final int engineChars;
   final _Normalized normalized;
   final List<HighlightRecord> highlights;
+  final bool isPlaceholder;
+
+  _ReaderSection copyWithHighlights(List<HighlightRecord> value) =>
+      _ReaderSection(
+        index: index,
+        blocks: blocks,
+        pages: pages,
+        enginePlain: enginePlain,
+        engineChars: engineChars,
+        normalized: normalized,
+        highlights: value,
+        isPlaceholder: isPlaceholder,
+      );
 }
 
 class _ContinuousPage {
-  const _ContinuousPage({required this.section, required this.page});
+  const _ContinuousPage({
+    required this.section,
+    required this.page,
+    required this.sectionPageIndex,
+  });
 
   final _ReaderSection section;
   final _ReaderPage page;
+  final int sectionPageIndex;
 }
 
 class _Normalized {

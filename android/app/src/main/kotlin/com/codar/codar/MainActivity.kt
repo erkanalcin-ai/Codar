@@ -11,6 +11,7 @@ import android.provider.MediaStore
 import android.view.View
 import android.view.WindowInsetsController
 import java.io.File
+import java.io.ByteArrayOutputStream
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.FileInputStream
@@ -44,16 +45,28 @@ class MainActivity : FlutterActivity() {
                             val bytes = call.argument<ByteArray>("bytes")!!
                             result.success(importFile(name, mime, bytes))
                         }
-                        "movePickedFile" -> {
+                        "copyPickedFile" -> {
                             val name = call.argument<String>("name")!!
                             val mime = call.argument<String>("mime") ?: "application/octet-stream"
                             val sourceUri = call.argument<String>("sourceUri")!!
                             val size = call.argument<Number>("size")?.toLong() ?: -1L
-                            result.success(movePickedFile(name, mime, sourceUri, size))
+                            result.success(copyPickedFile(name, mime, sourceUri, size))
+                        }
+                        "deletePickedSource" -> {
+                            val sourceUri = Uri.parse(call.argument<String>("sourceUri")!!)
+                            result.success(deleteSource(sourceUri))
                         }
                         "readFile" -> {
                             val uri = call.argument<String>("uri")!!
-                            result.success(readFile(uri))
+                            val maxBytes = call.argument<Number>("maxBytes")?.toLong()
+                                ?: throw IllegalArgumentException("Missing readFile size limit")
+                            result.success(readFile(uri, maxBytes))
+                        }
+                        "copyFileToPath" -> {
+                            val uri = Uri.parse(call.argument<String>("uri")!!)
+                            val path = call.argument<String>("path")!!
+                            val size = call.argument<Number>("size")?.toLong() ?: -1L
+                            result.success(copyFileToPath(uri, path, size))
                         }
                         "listTreeFiles" -> {
                             val treeUri = call.argument<String>("treeUri")!!
@@ -76,6 +89,29 @@ class MainActivity : FlutterActivity() {
                     result.error("STORAGE_ERROR", e.message, null)
                 }
             }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "codar/app")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "getAppVersion" -> result.success(
+                        mapOf(
+                            "name" to (packageManager.getPackageInfo(packageName, 0)
+                                .versionName ?: ""),
+                            "code" to installedVersionCode().toString(),
+                        ),
+                    )
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun installedVersionCode(): Long {
+        val packageInfo = packageManager.getPackageInfo(packageName, 0)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            packageInfo.longVersionCode
+        } else {
+            packageInfo.versionCode.toLong()
+        }
     }
 
     private fun importFile(name: String, mime: String, bytes: ByteArray): String {
@@ -114,11 +150,10 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
-     * Streams the original picker URI into CodarLib and removes the source
-     * only after a complete, size-checked write. A failed validation never
-     * calls this method, so corrupt books remain in their original folder.
+     * Streams the selected URI into CodarLib without removing the source.
+     * Dart deletes the source only after the database commit succeeds.
      */
-    private fun movePickedFile(
+    private fun copyPickedFile(
         name: String,
         mime: String,
         sourceUriString: String,
@@ -129,13 +164,13 @@ class MainActivity : FlutterActivity() {
             throw IllegalArgumentException("Invalid source URI: $sourceUriString")
         }
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            moveModernMediaStore(name, mime, sourceUri, expectedSize)
+            copyModernMediaStore(name, mime, sourceUri, expectedSize)
         } else {
-            moveLegacyAppStorage(name, sourceUri, expectedSize)
+            copyLegacyAppStorage(name, sourceUri, expectedSize)
         }
     }
 
-    private fun moveModernMediaStore(
+    private fun copyModernMediaStore(
         name: String,
         mime: String,
         sourceUri: Uri,
@@ -161,9 +196,6 @@ class MainActivity : FlutterActivity() {
             if (published != 1) {
                 throw IllegalStateException("Cannot publish CodarLib entry")
             }
-            if (!deleteSource(sourceUri)) {
-                throw IllegalStateException("Selected source could not be removed")
-            }
             return destination.toString()
         } catch (t: Throwable) {
             contentResolver.delete(destination, null, null)
@@ -171,7 +203,7 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun moveLegacyAppStorage(
+    private fun copyLegacyAppStorage(
         name: String,
         sourceUri: Uri,
         expectedSize: Long
@@ -184,9 +216,6 @@ class MainActivity : FlutterActivity() {
         try {
             FileOutputStream(destination).use { output ->
                 copySource(sourceUri, output, expectedSize)
-            }
-            if (!deleteSource(sourceUri)) {
-                throw IllegalStateException("Selected source could not be removed")
             }
             return Uri.fromFile(destination).toString()
         } catch (t: Throwable) {
@@ -280,14 +309,45 @@ class MainActivity : FlutterActivity() {
         return Uri.fromFile(file).toString()
     }
 
-    private fun readFile(uriString: String): ByteArray {
+    private fun readFile(uriString: String, maxBytes: Long): ByteArray {
+        require(maxBytes > 0) { "Invalid readFile size limit" }
         val uri = Uri.parse(uriString)
-        if (uri.scheme == "file") {
-            val path = uri.path ?: throw IllegalStateException("Invalid file URI: $uriString")
-            return File(path).readBytes()
-        }
-        return contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        val input = openSourceInput(uri)
             ?: throw IllegalStateException("Cannot open input stream for $uriString")
+        val output = ByteArrayOutputStream()
+        val buffer = ByteArray(64 * 1024)
+        var total = 0L
+        input.use { stream ->
+            while (true) {
+                val read = stream.read(buffer)
+                if (read < 0) break
+                if (read == 0) continue
+                if (total + read > maxBytes) {
+                    throw IllegalArgumentException("Selected file exceeds import size limit")
+                }
+                output.write(buffer, 0, read)
+                total += read
+            }
+        }
+        return output.toByteArray()
+    }
+
+    private fun copyFileToPath(uri: Uri, path: String, expectedSize: Long): Boolean {
+        val destination = File(path)
+        destination.parentFile?.let { parent ->
+            if (!parent.exists() && !parent.mkdirs()) {
+                throw IllegalStateException("Cannot create staging directory")
+            }
+        }
+        try {
+            FileOutputStream(destination).use { output ->
+                copySource(uri, output, expectedSize)
+            }
+            return true
+        } catch (t: Throwable) {
+            destination.delete()
+            throw t
+        }
     }
 
     /**
@@ -375,8 +435,8 @@ class MainActivity : FlutterActivity() {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             listModernMediaStore()
         } else {
-            legacyLibraryDir().listFiles()
-                .orEmpty()
+            (legacyLibraryDir().listFiles()
+                ?: throw IllegalStateException("Cannot list CodarLib files"))
                 .filter { it.isFile }
                 .map { mapOf("name" to it.name, "uri" to Uri.fromFile(it).toString()) }
         }
@@ -393,7 +453,9 @@ class MainActivity : FlutterActivity() {
         val selection = "${MediaStore.MediaColumns.OWNER_PACKAGE_NAME} = ? AND " +
             "${MediaStore.MediaColumns.RELATIVE_PATH} = ?"
         val args = arrayOf(applicationContext.packageName, downloadsRelativePath)
-        contentResolver.query(collection, projection, selection, args, null)?.use { cursor ->
+        val cursor = contentResolver.query(collection, projection, selection, args, null)
+            ?: throw IllegalStateException("Cannot query CodarLib files")
+        cursor.use {
             val idCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
             val nameCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
             while (cursor.moveToNext()) {

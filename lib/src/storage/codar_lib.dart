@@ -42,36 +42,54 @@ class CodarLibStorage {
     return uri;
   }
 
-  /// Moves a user-selected local file into CodarLib.
-  ///
-  /// The Android side streams from the original SAF/file URI into the
-  /// CodarLib destination and deletes the source only after the stream has
-  /// completed and its size matches. This avoids a persistent duplicate.
-  Future<String> movePickedFile({
+  /// Copies a selected file into CodarLib. The source remains until its
+  /// database record has been committed successfully.
+  Future<String> copyPickedFile({
     required String name,
     required String mime,
     required String sourceUri,
     required int size,
   }) async {
-    final uri = await _ch.invokeMethod<String>('movePickedFile', {
+    final uri = await _ch.invokeMethod<String>('copyPickedFile', {
       'name': name,
       'mime': mime,
       'sourceUri': sourceUri,
       'size': size,
     });
-    if (uri == null) throw StateError('movePickedFile returned null');
+    if (uri == null) throw StateError('copyPickedFile returned null');
     return uri;
   }
 
-  Future<Uint8List> readFile(String uri) async {
-    final bytes = await _ch.invokeMethod<Uint8List>('readFile', {'uri': uri});
+  Future<bool> deletePickedSource(String sourceUri) async =>
+      await _ch.invokeMethod<bool>('deletePickedSource', {
+        'sourceUri': sourceUri,
+      }) ??
+      false;
+
+  Future<Uint8List> readFile(String uri, {required int maxBytes}) async {
+    final bytes = await _ch.invokeMethod<Uint8List>('readFile', {
+      'uri': uri,
+      'maxBytes': maxBytes,
+    });
     if (bytes == null) throw StateError('readFile returned null');
     return bytes;
   }
 
+  Future<bool> copyFileToPath({
+    required String uri,
+    required String path,
+    required int size,
+  }) async =>
+      await _ch.invokeMethod<bool>('copyFileToPath', {
+        'uri': uri,
+        'path': path,
+        'size': size,
+      }) ??
+      false;
+
   Future<List<CodarLibFile>> listCodarLib() async {
     final raw = await _ch.invokeMethod<List<dynamic>>('listCodarLib');
-    if (raw == null) return [];
+    if (raw == null) throw StateError('listCodarLib returned null');
     return raw
         .cast<Map<dynamic, dynamic>>()
         .map(

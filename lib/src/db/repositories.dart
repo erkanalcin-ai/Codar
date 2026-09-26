@@ -11,6 +11,46 @@ class BooksRepository {
   BooksRepository(this._db);
   final CodarDatabase _db;
 
+  /// Commit a new book and its physical-file reference together.
+  Future<void> addImportedBook({
+    required String bookId,
+    required String title,
+    required String author,
+    required String language,
+    required String format,
+    required int sectionCount,
+    required int fileSize,
+    required String fingerprint,
+    required String displayName,
+    required String mime,
+    required String mediastoreUri,
+  }) async {
+    final now = _now();
+    await _db.db.transaction((txn) async {
+      await txn.insert('books', {
+        'book_id': bookId,
+        'title': title,
+        'author': author,
+        'language': language,
+        'format': format,
+        'section_count': sectionCount,
+        'file_size': fileSize,
+        'fingerprint': fingerprint,
+        'added_at': now,
+        'last_opened_at': now,
+      });
+      await txn.insert('book_files', {
+        'book_id': bookId,
+        'kind': 'original',
+        'display_name': displayName,
+        'mime': mime,
+        'mediastore_uri': mediastoreUri,
+        'cache_path': '',
+        'size': fileSize,
+      });
+    });
+  }
+
   Future<void> upsertBook({
     required String bookId,
     required String title,
@@ -154,6 +194,7 @@ class BooksRepository {
       '''
       SELECT b.* FROM books b
       JOIN reading_progress p ON p.book_id = b.book_id
+      WHERE p.char_offset > 0 OR p.progression > 0
       ORDER BY p.updated_at DESC LIMIT ?
     ''',
       [limit],
@@ -172,10 +213,19 @@ class BooksRepository {
   }
 
   Future<List<BookRecord>> recentlyAdded({int limit = 10}) async {
-    final rows = await _db.db.query(
-      'books',
-      orderBy: 'added_at DESC',
-      limit: limit,
+    final rows = await _db.db.rawQuery(
+      '''
+      SELECT b.* FROM books b
+      WHERE NOT EXISTS (
+        SELECT 1 FROM book_metadata bm
+        WHERE bm.book_id = b.book_id
+          AND bm.key = 'bundled_sample'
+          AND bm.value = '1'
+      )
+      ORDER BY b.added_at DESC
+      LIMIT ?
+      ''',
+      [limit],
     );
     return rows.map(BookRecord.fromMap).toList();
   }

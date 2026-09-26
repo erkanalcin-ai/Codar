@@ -387,6 +387,7 @@ version = "0.1.0"
 dependencies = [
  "ebook-rs",
  "flutter_rust_bridge",
+ "pdf_oxide",
  "serde",
  "serde_json",
 ]

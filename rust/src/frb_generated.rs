@@ -625,6 +625,13 @@ impl SseDecode for f64 {
     }
 }
 
+impl SseDecode for i32 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        deserializer.cursor.read_i32::<NativeEndian>().unwrap()
+    }
+}
+
 impl SseDecode for Vec<String> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -670,6 +677,20 @@ impl SseDecode for Vec<crate::reader::search::SearchHit> {
         let mut ans_ = Vec::with_capacity(len_ as usize);
         for idx_ in 0..len_ {
             ans_.push(<crate::reader::search::SearchHit>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::reader::content::SectionImage> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::reader::content::SectionImage>::sse_decode(
+                deserializer,
+            ));
         }
         return ans_;
     }
@@ -841,6 +862,7 @@ impl SseDecode for crate::reader::content::SectionContent {
         let mut var_html = <String>::sse_decode(deserializer);
         let mut var_plainText = <String>::sse_decode(deserializer);
         let mut var_charCount = <u64>::sse_decode(deserializer);
+        let mut var_images = <Vec<crate::reader::content::SectionImage>>::sse_decode(deserializer);
         return crate::reader::content::SectionContent {
             index: var_index,
             idref: var_idref,
@@ -848,6 +870,41 @@ impl SseDecode for crate::reader::content::SectionContent {
             html: var_html,
             plain_text: var_plainText,
             char_count: var_charCount,
+            images: var_images,
+        };
+    }
+}
+
+impl SseDecode for crate::reader::content::SectionImage {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_source = <String>::sse_decode(deserializer);
+        let mut var_mimeType = <String>::sse_decode(deserializer);
+        let mut var_data = <Vec<u8>>::sse_decode(deserializer);
+        let mut var_pixelWidth = <u32>::sse_decode(deserializer);
+        let mut var_pixelHeight = <u32>::sse_decode(deserializer);
+        let mut var_dataFormat = <String>::sse_decode(deserializer);
+        let mut var_left = <f32>::sse_decode(deserializer);
+        let mut var_top = <f32>::sse_decode(deserializer);
+        let mut var_displayWidth = <f32>::sse_decode(deserializer);
+        let mut var_displayHeight = <f32>::sse_decode(deserializer);
+        let mut var_pageWidth = <f32>::sse_decode(deserializer);
+        let mut var_pageHeight = <f32>::sse_decode(deserializer);
+        let mut var_rotationDegrees = <i32>::sse_decode(deserializer);
+        return crate::reader::content::SectionImage {
+            source: var_source,
+            mime_type: var_mimeType,
+            data: var_data,
+            pixel_width: var_pixelWidth,
+            pixel_height: var_pixelHeight,
+            data_format: var_dataFormat,
+            left: var_left,
+            top: var_top,
+            display_width: var_displayWidth,
+            display_height: var_displayHeight,
+            page_width: var_pageWidth,
+            page_height: var_pageHeight,
+            rotation_degrees: var_rotationDegrees,
         };
     }
 }
@@ -876,13 +933,6 @@ impl SseDecode for u8 {
 impl SseDecode for () {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {}
-}
-
-impl SseDecode for i32 {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        deserializer.cursor.read_i32::<NativeEndian>().unwrap()
-    }
 }
 
 fn pde_ffi_dispatcher_primary_impl(
@@ -1168,6 +1218,7 @@ impl flutter_rust_bridge::IntoDart for crate::reader::content::SectionContent {
             self.html.into_into_dart().into_dart(),
             self.plain_text.into_into_dart().into_dart(),
             self.char_count.into_into_dart().into_dart(),
+            self.images.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1180,6 +1231,38 @@ impl flutter_rust_bridge::IntoIntoDart<crate::reader::content::SectionContent>
     for crate::reader::content::SectionContent
 {
     fn into_into_dart(self) -> crate::reader::content::SectionContent {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::reader::content::SectionImage {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.source.into_into_dart().into_dart(),
+            self.mime_type.into_into_dart().into_dart(),
+            self.data.into_into_dart().into_dart(),
+            self.pixel_width.into_into_dart().into_dart(),
+            self.pixel_height.into_into_dart().into_dart(),
+            self.data_format.into_into_dart().into_dart(),
+            self.left.into_into_dart().into_dart(),
+            self.top.into_into_dart().into_dart(),
+            self.display_width.into_into_dart().into_dart(),
+            self.display_height.into_into_dart().into_dart(),
+            self.page_width.into_into_dart().into_dart(),
+            self.page_height.into_into_dart().into_dart(),
+            self.rotation_degrees.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::reader::content::SectionImage
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::reader::content::SectionImage>
+    for crate::reader::content::SectionImage
+{
+    fn into_into_dart(self) -> crate::reader::content::SectionImage {
         self
     }
 }
@@ -1244,6 +1327,13 @@ impl SseEncode for f64 {
     }
 }
 
+impl SseEncode for i32 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        serializer.cursor.write_i32::<NativeEndian>(self).unwrap();
+    }
+}
+
 impl SseEncode for Vec<String> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1280,6 +1370,16 @@ impl SseEncode for Vec<crate::reader::search::SearchHit> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::reader::search::SearchHit>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::reader::content::SectionImage> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::reader::content::SectionImage>::sse_encode(item, serializer);
         }
     }
 }
@@ -1418,6 +1518,26 @@ impl SseEncode for crate::reader::content::SectionContent {
         <String>::sse_encode(self.html, serializer);
         <String>::sse_encode(self.plain_text, serializer);
         <u64>::sse_encode(self.char_count, serializer);
+        <Vec<crate::reader::content::SectionImage>>::sse_encode(self.images, serializer);
+    }
+}
+
+impl SseEncode for crate::reader::content::SectionImage {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.source, serializer);
+        <String>::sse_encode(self.mime_type, serializer);
+        <Vec<u8>>::sse_encode(self.data, serializer);
+        <u32>::sse_encode(self.pixel_width, serializer);
+        <u32>::sse_encode(self.pixel_height, serializer);
+        <String>::sse_encode(self.data_format, serializer);
+        <f32>::sse_encode(self.left, serializer);
+        <f32>::sse_encode(self.top, serializer);
+        <f32>::sse_encode(self.display_width, serializer);
+        <f32>::sse_encode(self.display_height, serializer);
+        <f32>::sse_encode(self.page_width, serializer);
+        <f32>::sse_encode(self.page_height, serializer);
+        <i32>::sse_encode(self.rotation_degrees, serializer);
     }
 }
 
@@ -1445,13 +1565,6 @@ impl SseEncode for u8 {
 impl SseEncode for () {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {}
-}
-
-impl SseEncode for i32 {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        serializer.cursor.write_i32::<NativeEndian>(self).unwrap();
-    }
 }
 
 #[cfg(not(target_family = "wasm"))]

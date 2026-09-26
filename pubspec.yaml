@@ -3,7 +3,7 @@ description: "Local-first Flutter and Rust ebook reader for Codar."
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 
 # Android versionName/versionCode and iOS build name/number come from this value.
-version: 1.0.0+1
+version: 1.5.2+40
 
 environment:
   sdk: ^3.13.1
@@ -20,6 +20,7 @@ dependencies:
   file_picker: 12.2.0
   intl: 0.20.3
   url_launcher: ^6.3.2
+  in_app_update: 5.0.0
   flutter_rust_bridge: 2.13.0
   rust_lib_codar:
     path: rust_builder
@@ -41,6 +42,7 @@ flutter:
 
   # Phase 1 spike fixtures (tiny, bundled for on-device proof).
   assets:
+    - assets/books/kurk_mantolu_madonna.epub
     - assets/spike/min.epub
     - assets/spike/spike.pdf
     - assets/spike/spike.cbz

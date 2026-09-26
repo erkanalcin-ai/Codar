@@ -1,6 +1,9 @@
 // Settings: compact, row-based controls over the existing preferences.
 
+import 'dart:async';
+
 import 'package:codar/src/app/providers.dart';
+import 'package:codar/src/app/play_update_service.dart';
 import 'package:codar/src/brand/codar_brand.dart';
 import 'package:codar/src/db/models.dart';
 import 'package:codar/src/l10n/strings.dart';
@@ -13,6 +16,7 @@ import 'package:url_launcher/url_launcher.dart';
 final _privacyPolicyUri = Uri.parse(
   'https://erkanalcin-ai.github.io/Codar/privacy.html',
 );
+const _appChannel = MethodChannel('codar/app');
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -24,12 +28,50 @@ class SettingsScreen extends ConsumerStatefulWidget {
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   bool? _deleteFileDefault;
   bool? _enrichOnline;
+  String? _appVersion;
+  bool _updateAvailable = false;
+  bool _updateBusy = false;
   bool _busy = false;
 
   @override
   void initState() {
     super.initState();
     _load();
+    unawaited(_loadAppVersion());
+    unawaited(_checkForUpdate());
+  }
+
+  Future<void> _checkForUpdate() async {
+    final available = await PlayUpdateService.isUpdateAvailable();
+    if (!mounted) return;
+    setState(() => _updateAvailable = available);
+  }
+
+  Future<void> _startUpdate() async {
+    if (_updateBusy) return;
+    setState(() => _updateBusy = true);
+    try {
+      await PlayUpdateService.startUpdate();
+    } catch (_) {
+      // Play can reject an update request when this install is not eligible.
+    } finally {
+      if (mounted) {
+        setState(() => _updateBusy = false);
+        unawaited(_checkForUpdate());
+      }
+    }
+  }
+
+  Future<void> _loadAppVersion() async {
+    try {
+      final version = await _appChannel.invokeMapMethod<String, String>(
+        'getAppVersion',
+      );
+      final name = version?['name'];
+      final code = version?['code'];
+      if (!mounted || name == null || code == null) return;
+      setState(() => _appVersion = '$name ($code)');
+    } catch (_) {}
   }
 
   Future<void> _load() async {
@@ -230,9 +272,56 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   ],
                 ),
               ),
-              const Padding(
-                padding: EdgeInsets.only(bottom: 20),
-                child: CodarLogo(height: 240, onDarkBackground: true),
+              Padding(
+                padding: const EdgeInsets.only(bottom: 20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const CodarLogo(height: 240, onDarkBackground: true),
+                    if (_appVersion != null) ...[
+                      const SizedBox(height: 4),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            '${tr(locale, 'appVersion')} $_appVersion',
+                            style: const TextStyle(
+                              color: CodarColors.muted,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                          if (_updateAvailable) ...[
+                            const SizedBox(width: 8),
+                            TextButton.icon(
+                              onPressed: _updateBusy ? null : _startUpdate,
+                              style: TextButton.styleFrom(
+                                foregroundColor: CodarColors.gold,
+                                visualDensity: VisualDensity.compact,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                ),
+                              ),
+                              icon: _updateBusy
+                                  ? const SizedBox(
+                                      width: 14,
+                                      height: 14,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Icon(
+                                      Icons.system_update_alt,
+                                      size: 16,
+                                    ),
+                              label: Text(tr(locale, 'update')),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
               ),
             ],
           ),

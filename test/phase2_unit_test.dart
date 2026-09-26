@@ -7,7 +7,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('script/style/iframe content never survives parsing', () {
-    const html = '<html><head><style>.x{color:red}</style>'
+    const html =
+        '<html><head><style>.x{color:red}</style>'
         '<script>alert(document.cookie)</script></head>'
         '<body><h1>Title</h1><p onclick="evil()">Hello <b>World</b></p>'
         '<iframe src="http://evil.example/"></iframe></body></html>';
@@ -19,7 +20,7 @@ void main() {
     expect(all, isNot(contains('color:red')));
     expect(all, isNot(contains('evil')));
     expect(all, isNot(contains('<')));
-    expect(blocks.first.kind, 'h1');
+    expect((blocks.first as TextBlock).kind, 'h1');
   });
 
   test('entities and Turkish text decode correctly', () {
@@ -31,11 +32,31 @@ void main() {
     expect(blocks.first.plainText, isNot(contains('&ccedil;')));
   });
 
+  test(
+    'normal HTML collapses source whitespace but keeps br and pre breaks',
+    () {
+      const html =
+          '<p>First\n    wrapped\tline<br/>next</p>'
+          '<pre>one\n  two</pre><p>a&nbsp;  b</p>';
+      final blocks = parseSectionHtml(html);
+      expect(blocks.map((block) => block.plainText).toList(), [
+        'First wrapped line\nnext',
+        'one\n  two',
+        'a  b',
+      ]);
+    },
+  );
+
   test('lists and headings keep structure, unknown tags keep text', () {
     const html =
         '<h2>Chap</h2><ul><li>one</li><li>two</li></ul><foo>kept</foo>';
     final blocks = parseSectionHtml(html);
-    expect(blocks.map((b) => b.kind).toList(), ['h2', 'li', 'li', 'p']);
+    expect(blocks.map((b) => (b as TextBlock).kind).toList(), [
+      'h2',
+      'li',
+      'li',
+      'p',
+    ]);
     expect(blocks.last.plainText, contains('kept'));
   });
 
@@ -66,11 +87,32 @@ void main() {
     // Access both tables through tr() fallback behavior: unknown locale
     // falls back to TR, so compare key sets indirectly via known keys.
     const keys = [
-      'home', 'library', 'records', 'settings', 'continueReading',
-      'recentlyRead', 'favorites', 'allBooks', 'searchHint', 'noBooks',
-      'importBook', 'read', 'details', 'chapters', 'highlights', 'notes',
-      'bookmarks', 'readerSettings', 'theme', 'appLanguage', 'highlight',
-      'word', 'sentence', 'paragraph', 'collections', 'delete',
+      'home',
+      'library',
+      'records',
+      'settings',
+      'continueReading',
+      'recentlyRead',
+      'favorites',
+      'allBooks',
+      'searchHint',
+      'noBooks',
+      'importBook',
+      'read',
+      'details',
+      'chapters',
+      'highlights',
+      'notes',
+      'bookmarks',
+      'readerSettings',
+      'theme',
+      'appLanguage',
+      'highlight',
+      'word',
+      'sentence',
+      'paragraph',
+      'collections',
+      'delete',
     ];
     for (final k in keys) {
       expect(tr('en', k), isNot(k), reason: 'missing EN key: $k');

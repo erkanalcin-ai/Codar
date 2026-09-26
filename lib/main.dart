@@ -1,10 +1,14 @@
 // Codar — offline-first personal ebook library (Phase 2 product shell).
 
+import 'dart:async';
+
 import 'package:codar/src/app/providers.dart';
+import 'package:codar/src/app/play_update_service.dart';
 import 'package:codar/src/app/router.dart';
 import 'package:codar/src/brand/codar_brand.dart';
 import 'package:codar/src/l10n/strings.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 void main() {
@@ -18,16 +22,21 @@ class CodarApp extends ConsumerStatefulWidget {
   ConsumerState<CodarApp> createState() => _CodarAppState();
 }
 
-class _CodarAppState extends ConsumerState<CodarApp> {
+class _CodarAppState extends ConsumerState<CodarApp>
+    with WidgetsBindingObserver {
   bool _showSplash = true;
+  bool _bundledBookSeedStarted = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // Keep the branded hand-off visible for a short, bounded interval while
     // the first frame and the local database are becoming ready.
     Future<void>.delayed(const Duration(seconds: 2), () {
-      if (mounted) setState(() => _showSplash = false);
+      if (!mounted) return;
+      setState(() => _showSplash = false);
+      unawaited(PlayUpdateService.promptOnStartup());
     });
     // Load persisted locale + reader settings once the database is ready.
     ref.listenManual(databaseProvider, (prev, next) {
@@ -36,6 +45,10 @@ class _CodarAppState extends ConsumerState<CodarApp> {
         // this lands (fast restart, tests). Defaults are already in
         // place, so a late load must never crash the launch.
         try {
+          if (!_bundledBookSeedStarted) {
+            _bundledBookSeedStarted = true;
+            unawaited(_seedBundledSampleBook());
+          }
           final settings = ref.read(settingsRepoProvider);
           final locale = await settings.appValue('locale', 'tr');
           if (!mounted) return;
@@ -46,6 +59,49 @@ class _CodarAppState extends ConsumerState<CodarApp> {
         } catch (_) {}
       });
     }, fireImmediately: true);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(PlayUpdateService.promptOnStartup());
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  Future<void> _seedBundledSampleBook() async {
+    const settingKey = 'bundled_book_kurk_mantolu_madonna_v1';
+    try {
+      final settings = ref.read(settingsRepoProvider);
+      if (await settings.appValue(settingKey, '0') == '1') return;
+
+      final reader = ref.read(readerServiceProvider);
+      await reader.init();
+      final data = await rootBundle.load(
+        'assets/books/kurk_mantolu_madonna.epub',
+      );
+      final result = await ref
+          .read(importServiceProvider)
+          .importBytes(
+            displayName: 'Kürk_Mantolu_Madonna.epub',
+            bytes: data.buffer.asUint8List(
+              data.offsetInBytes,
+              data.lengthInBytes,
+            ),
+          );
+      await ref
+          .read(booksRepoProvider)
+          .setMetadata(result.bookId, 'bundled_sample', '1');
+      await settings.setAppValue(settingKey, '1');
+      if (mounted) ref.read(libraryRefreshProvider.notifier).bump();
+    } catch (error) {
+      debugPrint('Bundled sample book import failed: $error');
+    }
   }
 
   @override
