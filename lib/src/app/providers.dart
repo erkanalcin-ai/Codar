@@ -93,10 +93,20 @@ final localeProvider = NotifierProvider<LocaleNotifier, String>(LocaleNotifier.n
 
 /// Reader typography/theme. Loaded once, updated through settings screen.
 class ReaderSettingsNotifier extends Notifier<ReaderSettingsData> {
+  bool _hasUserEdit = false;
+
   @override
   ReaderSettingsData build() => ReaderSettingsData.fromMap({});
 
-  void set(ReaderSettingsData value) => state = value;
+  void set(ReaderSettingsData value) {
+    _hasUserEdit = true;
+    state = value;
+  }
+
+  void loadPersisted(ReaderSettingsData value) {
+    if (_hasUserEdit) return;
+    state = value;
+  }
 }
 
 final readerSettingsProvider =

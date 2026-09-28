@@ -26,17 +26,17 @@ class BookRecord {
   final int lastOpenedAt;
 
   factory BookRecord.fromMap(Map<String, Object?> m) => BookRecord(
-        bookId: m['book_id'] as String,
-        title: (m['title'] as String?) ?? '',
-        author: (m['author'] as String?) ?? '',
-        language: (m['language'] as String?) ?? '',
-        format: (m['format'] as String?) ?? '',
-        sectionCount: (m['section_count'] as int?) ?? 0,
-        fileSize: (m['file_size'] as int?) ?? 0,
-        fingerprint: (m['fingerprint'] as String?) ?? '',
-        addedAt: (m['added_at'] as int?) ?? 0,
-        lastOpenedAt: (m['last_opened_at'] as int?) ?? 0,
-      );
+    bookId: m['book_id'] as String,
+    title: (m['title'] as String?) ?? '',
+    author: (m['author'] as String?) ?? '',
+    language: (m['language'] as String?) ?? '',
+    format: (m['format'] as String?) ?? '',
+    sectionCount: (m['section_count'] as int?) ?? 0,
+    fileSize: (m['file_size'] as int?) ?? 0,
+    fingerprint: (m['fingerprint'] as String?) ?? '',
+    addedAt: (m['added_at'] as int?) ?? 0,
+    lastOpenedAt: (m['last_opened_at'] as int?) ?? 0,
+  );
 }
 
 /// A library list item with its optional, already-joined reading progress.
@@ -82,12 +82,12 @@ class FileRecord {
   final int size;
 
   factory FileRecord.fromMap(Map<String, Object?> m) => FileRecord(
-        displayName: (m['display_name'] as String?) ?? '',
-        mime: (m['mime'] as String?) ?? '',
-        mediastoreUri: (m['mediastore_uri'] as String?) ?? '',
-        cachePath: (m['cache_path'] as String?) ?? '',
-        size: (m['size'] as int?) ?? 0,
-      );
+    displayName: (m['display_name'] as String?) ?? '',
+    mime: (m['mime'] as String?) ?? '',
+    mediastoreUri: (m['mediastore_uri'] as String?) ?? '',
+    cachePath: (m['cache_path'] as String?) ?? '',
+    size: (m['size'] as int?) ?? 0,
+  );
 }
 
 class ProgressRecord {
@@ -108,13 +108,13 @@ class ProgressRecord {
   final int updatedAt;
 
   factory ProgressRecord.fromMap(Map<String, Object?> m) => ProgressRecord(
-        bookId: m['book_id'] as String,
-        locatorJson: (m['locator_json'] as String?) ?? '',
-        sectionIndex: (m['section_index'] as int?) ?? 0,
-        charOffset: (m['char_offset'] as int?) ?? 0,
-        progression: ((m['progression'] as num?) ?? 0).toDouble(),
-        updatedAt: (m['updated_at'] as int?) ?? 0,
-      );
+    bookId: m['book_id'] as String,
+    locatorJson: (m['locator_json'] as String?) ?? '',
+    sectionIndex: (m['section_index'] as int?) ?? 0,
+    charOffset: (m['char_offset'] as int?) ?? 0,
+    progression: ((m['progression'] as num?) ?? 0).toDouble(),
+    updatedAt: (m['updated_at'] as int?) ?? 0,
+  );
 }
 
 class HighlightRecord {
@@ -128,6 +128,7 @@ class HighlightRecord {
     required this.color,
     required this.quotedText,
     required this.note,
+    this.offsetUnit = 'unknown',
   });
 
   final int? id;
@@ -139,18 +140,20 @@ class HighlightRecord {
   final int color;
   final String quotedText;
   final String note;
+  final String offsetUnit;
 
   factory HighlightRecord.fromMap(Map<String, Object?> m) => HighlightRecord(
-        id: m['id'] as int?,
-        bookId: (m['book_id'] as String?) ?? '',
-        sectionIndex: (m['section_index'] as int?) ?? 0,
-        startOffset: (m['start_offset'] as int?) ?? 0,
-        endOffset: (m['end_offset'] as int?) ?? 0,
-        cfi: (m['cfi'] as String?) ?? '',
-        color: (m['color'] as int?) ?? 0,
-        quotedText: (m['quoted_text'] as String?) ?? '',
-        note: (m['note'] as String?) ?? '',
-      );
+    id: m['id'] as int?,
+    bookId: (m['book_id'] as String?) ?? '',
+    sectionIndex: (m['section_index'] as int?) ?? 0,
+    startOffset: (m['start_offset'] as int?) ?? 0,
+    endOffset: (m['end_offset'] as int?) ?? 0,
+    cfi: (m['cfi'] as String?) ?? '',
+    color: (m['color'] as int?) ?? 0,
+    quotedText: (m['quoted_text'] as String?) ?? '',
+    note: (m['note'] as String?) ?? '',
+    offsetUnit: (m['offset_unit'] as String?) ?? 'unknown',
+  );
 }
 
 class NoteRecord {
@@ -173,14 +176,14 @@ class NoteRecord {
   final String quotedText;
 
   factory NoteRecord.fromMap(Map<String, Object?> m) => NoteRecord(
-        id: m['id'] as int?,
-        bookId: (m['book_id'] as String?) ?? '',
-        sectionIndex: (m['section_index'] as int?) ?? 0,
-        cfi: (m['cfi'] as String?) ?? '',
-        charOffset: (m['char_offset'] as int?) ?? 0,
-        content: (m['content'] as String?) ?? '',
-        quotedText: (m['quoted_text'] as String?) ?? '',
-      );
+    id: m['id'] as int?,
+    bookId: (m['book_id'] as String?) ?? '',
+    sectionIndex: (m['section_index'] as int?) ?? 0,
+    cfi: (m['cfi'] as String?) ?? '',
+    charOffset: (m['char_offset'] as int?) ?? 0,
+    content: (m['content'] as String?) ?? '',
+    quotedText: (m['quoted_text'] as String?) ?? '',
+  );
 }
 
 class BookmarkRecord {
@@ -201,13 +204,13 @@ class BookmarkRecord {
   final String label;
 
   factory BookmarkRecord.fromMap(Map<String, Object?> m) => BookmarkRecord(
-        id: m['id'] as int?,
-        bookId: (m['book_id'] as String?) ?? '',
-        sectionIndex: (m['section_index'] as int?) ?? 0,
-        cfi: (m['cfi'] as String?) ?? '',
-        charOffset: (m['char_offset'] as int?) ?? 0,
-        label: (m['label'] as String?) ?? '',
-      );
+    id: m['id'] as int?,
+    bookId: (m['book_id'] as String?) ?? '',
+    sectionIndex: (m['section_index'] as int?) ?? 0,
+    cfi: (m['cfi'] as String?) ?? '',
+    charOffset: (m['char_offset'] as int?) ?? 0,
+    label: (m['label'] as String?) ?? '',
+  );
 }
 
 class CollectionRecord {
@@ -218,10 +221,10 @@ class CollectionRecord {
   final int createdAt;
 
   factory CollectionRecord.fromMap(Map<String, Object?> m) => CollectionRecord(
-        id: m['id'] as int?,
-        name: (m['name'] as String?) ?? '',
-        createdAt: (m['created_at'] as int?) ?? 0,
-      );
+    id: m['id'] as int?,
+    name: (m['name'] as String?) ?? '',
+    createdAt: (m['created_at'] as int?) ?? 0,
+  );
 }
 
 class ReaderSettingsData {
@@ -232,6 +235,7 @@ class ReaderSettingsData {
     required this.marginPx,
     required this.alignment,
     required this.theme,
+    this.brightness,
   });
 
   final String fontFamily;
@@ -240,22 +244,56 @@ class ReaderSettingsData {
   final int marginPx;
   final String alignment;
   final String theme;
+  final double? brightness;
 
-  factory ReaderSettingsData.fromMap(Map<String, Object?> m) => ReaderSettingsData(
+  factory ReaderSettingsData.fromMap(Map<String, Object?> m) =>
+      ReaderSettingsData(
         fontFamily: (m['font_family'] as String?) ?? 'System',
         fontSizePx: (m['font_size_px'] as int?) ?? 18,
         lineHeight: ((m['line_height'] as num?) ?? 1.5).toDouble(),
         marginPx: (m['margin_px'] as int?) ?? 48,
         alignment: (m['alignment'] as String?) ?? 'start',
         theme: (m['theme'] as String?) ?? 'light',
+        brightness: (m['brightness'] as num?)?.toDouble(),
       );
 
   Map<String, Object?> toMap() => {
-        'font_family': fontFamily,
-        'font_size_px': fontSizePx,
-        'line_height': lineHeight,
-        'margin_px': marginPx,
-        'alignment': alignment,
-        'theme': theme,
-      };
+    'font_family': fontFamily,
+    'font_size_px': fontSizePx,
+    'line_height': lineHeight,
+    'margin_px': marginPx,
+    'alignment': alignment,
+    'theme': theme,
+    'brightness': brightness,
+  };
+}
+
+class QuoteRecord {
+  QuoteRecord({
+    this.id,
+    required this.bookId,
+    required this.sectionIndex,
+    required this.charOffset,
+    required this.cfi,
+    required this.quotedText,
+    this.createdAt = 0,
+  });
+
+  final int? id;
+  final String bookId;
+  final int sectionIndex;
+  final int charOffset;
+  final String cfi;
+  final String quotedText;
+  final int createdAt;
+
+  factory QuoteRecord.fromMap(Map<String, Object?> map) => QuoteRecord(
+    id: map['id'] as int?,
+    bookId: (map['book_id'] as String?) ?? '',
+    sectionIndex: (map['section_index'] as int?) ?? 0,
+    charOffset: (map['char_offset'] as int?) ?? 0,
+    cfi: (map['cfi'] as String?) ?? '',
+    quotedText: (map['quoted_text'] as String?) ?? '',
+    createdAt: (map['created_at'] as int?) ?? 0,
+  );
 }

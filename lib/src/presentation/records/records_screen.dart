@@ -13,7 +13,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 class RecordsScreen extends ConsumerStatefulWidget {
-  const RecordsScreen({super.key});
+  const RecordsScreen({super.key, this.initialTab});
+  final String? initialTab;
 
   @override
   ConsumerState<RecordsScreen> createState() => _RecordsScreenState();
@@ -21,7 +22,22 @@ class RecordsScreen extends ConsumerStatefulWidget {
 
 class _RecordsScreenState extends ConsumerState<RecordsScreen>
     with SingleTickerProviderStateMixin {
-  late final TabController _tabs = TabController(length: 3, vsync: this);
+  late final TabController _tabs;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabs = TabController(
+      length: 4,
+      initialIndex: switch (widget.initialTab) {
+        'quotes' => 3,
+        'notes' => 1,
+        'bookmarks' => 2,
+        _ => 0,
+      },
+      vsync: this,
+    );
+  }
 
   @override
   void dispose() {
@@ -63,6 +79,10 @@ class _RecordsScreenState extends ConsumerState<RecordsScreen>
                   icon: const Icon(Icons.bookmark_outline),
                   text: tr(locale, 'bookmarks'),
                 ),
+                Tab(
+                  icon: const Icon(Icons.format_quote_rounded),
+                  text: tr(locale, 'quotes'),
+                ),
               ],
             ),
           ),
@@ -79,6 +99,7 @@ class _RecordsScreenState extends ConsumerState<RecordsScreen>
                   _HighlightsTab(items: all.highlights),
                   _NotesTab(items: all.notes),
                   _BookmarksTab(items: all.bookmarks),
+                  _QuotesTab(items: all.quotes),
                 ],
               );
             },
@@ -94,6 +115,7 @@ class _RecordsScreenState extends ConsumerState<RecordsScreen>
     final h = <(String, HighlightRecord)>[];
     final n = <(String, NoteRecord)>[];
     final b = <(String, BookmarkRecord)>[];
+    final q = <(String, QuoteRecord)>[];
     for (final book in books) {
       for (final x in await ann.allHighlights(book.bookId)) {
         h.add((book.title, x));
@@ -104,8 +126,11 @@ class _RecordsScreenState extends ConsumerState<RecordsScreen>
       for (final x in await ann.allBookmarks(book.bookId)) {
         b.add((book.title, x));
       }
+      for (final x in await ann.allQuotes(book.bookId)) {
+        q.add((book.title, x));
+      }
     }
-    return _AllRecords(highlights: h, notes: n, bookmarks: b);
+    return _AllRecords(highlights: h, notes: n, bookmarks: b, quotes: q);
   }
 }
 
@@ -114,13 +139,19 @@ class _AllRecords {
     required this.highlights,
     required this.notes,
     required this.bookmarks,
+    required this.quotes,
   });
   final List<(String, HighlightRecord)> highlights;
   final List<(String, NoteRecord)> notes;
   final List<(String, BookmarkRecord)> bookmarks;
+  final List<(String, QuoteRecord)> quotes;
 
-  factory _AllRecords.empty() =>
-      _AllRecords(highlights: const [], notes: const [], bookmarks: const []);
+  factory _AllRecords.empty() => _AllRecords(
+    highlights: const [],
+    notes: const [],
+    bookmarks: const [],
+    quotes: const [],
+  );
 }
 
 void _jump(
@@ -321,6 +352,54 @@ class _BookmarksTab extends ConsumerWidget {
               section: b.sectionIndex,
               offset: b.charOffset,
               cfi: b.cfi,
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _QuotesTab extends ConsumerWidget {
+  const _QuotesTab({required this.items});
+  final List<(String, QuoteRecord)> items;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final locale = ref.watch(localeProvider);
+    if (items.isEmpty) {
+      return CodarEmptyState(
+        icon: Icons.format_quote_rounded,
+        title: tr(locale, 'quotes'),
+        subtitle: tr(locale, 'noQuotes'),
+      );
+    }
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 28),
+      itemCount: items.length,
+      separatorBuilder: (context, index) => const SizedBox(height: 8),
+      itemBuilder: (context, index) {
+        final (title, quote) = items[index];
+        return Card(
+          child: ListTile(
+            leading: const Icon(Icons.format_quote_rounded),
+            title: Text(quote.quotedText, softWrap: true),
+            subtitle: Text(_safe(title, 60), maxLines: 1),
+            trailing: IconButton(
+              tooltip: tr(locale, 'delete'),
+              icon: const Icon(Icons.delete_outline),
+              onPressed: () async {
+                if (quote.id == null) return;
+                await ref.read(annotationsRepoProvider).deleteQuote(quote.id!);
+                ref.read(libraryRefreshProvider.notifier).bump();
+              },
+            ),
+            onTap: () => _jump(
+              context,
+              quote.bookId,
+              section: quote.sectionIndex,
+              offset: quote.charOffset,
+              cfi: quote.cfi,
             ),
           ),
         );

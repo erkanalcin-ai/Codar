@@ -25,6 +25,19 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/epub+zip" />
+                <data android:mimeType="application/x-mobipocket-ebook" />
+                <data android:mimeType="application/vnd.amazon.mobi8-ebook" />
+                <data android:mimeType="application/x-fictionbook+xml" />
+                <data android:mimeType="application/x-ms-reader" />
+                <data android:mimeType="application/x-cbz" />
+                <data android:mimeType="application/pdf" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="text/markdown" />
+            </intent-filter>
         </activity>
         <meta-data
             android:name="flutterEmbedding"

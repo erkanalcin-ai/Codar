@@ -5,7 +5,6 @@ import 'dart:async';
 import 'package:codar/src/app/providers.dart';
 import 'package:codar/src/app/play_update_service.dart';
 import 'package:codar/src/brand/codar_brand.dart';
-import 'package:codar/src/db/models.dart';
 import 'package:codar/src/l10n/strings.dart';
 import 'package:codar/src/library/backup_service.dart';
 import 'package:flutter/material.dart';
@@ -91,7 +90,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final locale = ref.watch(localeProvider);
-    final readerSettings = ref.watch(readerSettingsProvider);
     return Theme(
       data: CodarColors.dark(),
       child: AnnotatedRegion<SystemUiOverlayStyle>(
@@ -104,17 +102,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ),
         child: Scaffold(
           backgroundColor: CodarColors.background,
-          appBar: AppBar(
-            title: Text(tr(locale, 'settings')),
-            actions: [
-              IconButton(
-                tooltip: tr(locale, 'readerSettings'),
-                icon: const Icon(Icons.text_fields_rounded),
-                onPressed: () => _showReaderSettings(locale, readerSettings),
-              ),
-              const SizedBox(width: 8),
-            ],
-          ),
+          appBar: AppBar(title: Text(tr(locale, 'settings'))),
           body: Column(
             children: [
               Expanded(
@@ -154,26 +142,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                               },
                             ),
                           ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    _SettingsGroup(
-                      title: tr(locale, 'readerSettings'),
-                      children: [
-                        ListTile(
-                          leading: const Icon(
-                            Icons.auto_stories_rounded,
-                            color: CodarColors.gold,
-                          ),
-                          title: Text(tr(locale, 'readerSettings')),
-                          subtitle: Text(
-                            '${tr(locale, 'fontSize')}: ${readerSettings.fontSizePx} · '
-                            '${_themeLabel(locale, readerSettings.theme)}',
-                          ),
-                          trailing: const Icon(Icons.chevron_right_rounded),
-                          onTap: () =>
-                              _showReaderSettings(locale, readerSettings),
                         ),
                       ],
                     ),
@@ -330,151 +298,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
   }
 
-  static String _cap(String value) =>
-      value.isEmpty ? value : value[0].toUpperCase() + value.substring(1);
-
-  static String _themeLabel(String locale, String theme) =>
-      tr(locale, 'theme${_cap(theme)}');
-
-  Future<void> _showReaderSettings(
-    String locale,
-    ReaderSettingsData initial,
-  ) async {
-    var draft = initial;
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (sheetContext) => StatefulBuilder(
-        builder: (sheetContext, setSheetState) {
-          void update(ReaderSettingsData next) {
-            draft = next;
-            setSheetState(() {});
-            _update(ref, next);
-          }
-
-          return SafeArea(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    tr(locale, 'readerSettings'),
-                    style: Theme.of(sheetContext).textTheme.titleLarge
-                        ?.copyWith(fontWeight: FontWeight.w800),
-                  ),
-                  const SizedBox(height: 14),
-                  _Row(
-                    label: tr(locale, 'fontFamily'),
-                    child: DropdownButton<String>(
-                      value: draft.fontFamily,
-                      isExpanded: true,
-                      underline: const SizedBox.shrink(),
-                      items: const ['System', 'Serif', 'Monospace']
-                          .map(
-                            (font) => DropdownMenuItem(
-                              value: font,
-                              child: Text(font),
-                            ),
-                          )
-                          .toList(),
-                      onChanged: (value) =>
-                          update(draft.copyWith(fontFamily: value ?? 'System')),
-                    ),
-                  ),
-                  _SliderRow(
-                    label: tr(locale, 'fontSize'),
-                    value: draft.fontSizePx.toDouble(),
-                    min: 12,
-                    max: 32,
-                    divisions: 20,
-                    display: '${draft.fontSizePx}',
-                    onChanged: (value) =>
-                        update(draft.copyWith(fontSizePx: value.round())),
-                  ),
-                  _SliderRow(
-                    label: tr(locale, 'lineHeight'),
-                    value: draft.lineHeight,
-                    min: 1,
-                    max: 2.2,
-                    divisions: 12,
-                    display: draft.lineHeight.toStringAsFixed(2),
-                    onChanged: (value) =>
-                        update(draft.copyWith(lineHeight: value)),
-                  ),
-                  _SliderRow(
-                    label: tr(locale, 'margin'),
-                    value: draft.marginPx.toDouble(),
-                    min: 8,
-                    max: 96,
-                    divisions: 11,
-                    display: '${draft.marginPx}',
-                    onChanged: (value) =>
-                        update(draft.copyWith(marginPx: value.round())),
-                  ),
-                  _Row(
-                    label: tr(locale, 'alignment'),
-                    child: SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: SegmentedButton<String>(
-                        segments: [
-                          ButtonSegment(
-                            value: 'start',
-                            label: Text(tr(locale, 'alignStart')),
-                          ),
-                          ButtonSegment(
-                            value: 'center',
-                            label: Text(tr(locale, 'alignCenter')),
-                          ),
-                          ButtonSegment(
-                            value: 'justify',
-                            label: Text(tr(locale, 'alignJustify')),
-                          ),
-                        ],
-                        selected: {draft.alignment},
-                        onSelectionChanged: (value) =>
-                            update(draft.copyWith(alignment: value.first)),
-                      ),
-                    ),
-                  ),
-                  _Row(
-                    label: tr(locale, 'theme'),
-                    child: DropdownButton<String>(
-                      value: draft.theme,
-                      isExpanded: true,
-                      underline: const SizedBox.shrink(),
-                      items: [
-                        for (final theme in [
-                          'light',
-                          'dark',
-                          'sepia',
-                          'warm',
-                          'black',
-                        ])
-                          DropdownMenuItem(
-                            value: theme,
-                            child: Text(tr(locale, 'theme${_cap(theme)}')),
-                          ),
-                      ],
-                      onChanged: (value) =>
-                          update(draft.copyWith(theme: value ?? 'light')),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Future<void> _update(WidgetRef ref, ReaderSettingsData next) async {
-    ref.read(readerSettingsProvider.notifier).set(next);
-    await ref.read(settingsRepoProvider).saveReaderSettings(next);
-  }
-
   Future<void> _exportBackup(String locale) async {
     setState(() => _busy = true);
     try {
@@ -583,95 +406,6 @@ class _SettingsGroup extends StatelessWidget {
           ),
         ),
       ],
-    );
-  }
-}
-
-extension ReaderSettingsCopy on ReaderSettingsData {
-  ReaderSettingsData copyWith({
-    String? fontFamily,
-    int? fontSizePx,
-    double? lineHeight,
-    int? marginPx,
-    String? alignment,
-    String? theme,
-  }) => ReaderSettingsData(
-    fontFamily: fontFamily ?? this.fontFamily,
-    fontSizePx: fontSizePx ?? this.fontSizePx,
-    lineHeight: lineHeight ?? this.lineHeight,
-    marginPx: marginPx ?? this.marginPx,
-    alignment: alignment ?? this.alignment,
-    theme: theme ?? this.theme,
-  );
-}
-
-class _Row extends StatelessWidget {
-  const _Row({required this.label, required this.child});
-
-  final String label;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            label,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 6),
-          child,
-        ],
-      ),
-    );
-  }
-}
-
-class _SliderRow extends StatelessWidget {
-  const _SliderRow({
-    required this.label,
-    required this.value,
-    required this.min,
-    required this.max,
-    required this.divisions,
-    required this.display,
-    required this.onChanged,
-  });
-
-  final String label;
-  final double value;
-  final double min;
-  final double max;
-  final int divisions;
-  final String display;
-  final ValueChanged<double> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        children: [
-          SizedBox(width: 112, child: Text(label)),
-          Expanded(
-            child: Slider(
-              value: value.clamp(min, max),
-              min: min,
-              max: max,
-              divisions: divisions,
-              label: display,
-              onChanged: onChanged,
-            ),
-          ),
-          SizedBox(width: 44, child: Text(display)),
-        ],
-      ),
     );
   }
 }

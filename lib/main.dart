@@ -7,6 +7,7 @@ import 'package:codar/src/app/play_update_service.dart';
 import 'package:codar/src/app/router.dart';
 import 'package:codar/src/brand/codar_brand.dart';
 import 'package:codar/src/l10n/strings.dart';
+import 'package:codar/src/reader/locator_nav.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -26,11 +27,17 @@ class _CodarAppState extends ConsumerState<CodarApp>
     with WidgetsBindingObserver {
   bool _showSplash = true;
   bool _bundledBookSeedStarted = false;
+  Future<void> _externalOpenTail = Future.value();
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    const MethodChannel('codar/open_with').setMethodCallHandler((call) async {
+      if (call.method == 'openWithFile' && call.arguments is Map) {
+        _queueExternalOpen(Map<String, Object?>.from(call.arguments as Map));
+      }
+    });
     // Keep the branded hand-off visible for a short, bounded interval while
     // the first frame and the local database are becoming ready.
     Future<void>.delayed(const Duration(seconds: 2), () {
@@ -55,10 +62,50 @@ class _CodarAppState extends ConsumerState<CodarApp>
           ref.read(localeProvider.notifier).set(locale);
           final rs = await settings.readerSettings();
           if (!mounted) return;
-          ref.read(readerSettingsProvider.notifier).set(rs);
+          ref.read(readerSettingsProvider.notifier).loadPersisted(rs);
+          unawaited(_takePendingOpenWithFiles());
         } catch (_) {}
       });
     }, fireImmediately: true);
+  }
+
+  Future<void> _takePendingOpenWithFiles() async {
+    try {
+      final pending = await const MethodChannel('codar/open_with')
+          .invokeMethod<List<dynamic>>('takePendingOpenWithFiles');
+      for (final item in pending ?? const []) {
+        if (item is Map) {
+          _queueExternalOpen(Map<String, Object?>.from(item));
+        }
+      }
+    } catch (_) {}
+  }
+
+  void _queueExternalOpen(Map<String, Object?> file) {
+    final next = _externalOpenTail.then((_) => _importExternalOpen(file));
+    _externalOpenTail = next.then((_) {}, onError: (_) {});
+  }
+
+  Future<void> _importExternalOpen(Map<String, Object?> file) async {
+    if (!mounted) return;
+    final uri = file['uri']?.toString() ?? '';
+    if (uri.isEmpty) return;
+    try {
+      await ref.read(databaseProvider.future);
+      final result = await ref
+          .read(importServiceProvider)
+          .importExternalUri(
+            displayName: file['displayName']?.toString() ?? '',
+            sourceUri: uri,
+            sourceSize: (file['size'] as num?)?.toInt() ?? -1,
+            mimeType: file['mimeType']?.toString() ?? '',
+          );
+      if (!mounted) return;
+      ref.read(libraryRefreshProvider.notifier).bump();
+      appRouter.go(readerRouteFor(result.bookId));
+    } catch (_) {
+      debugPrint('Unable to import external ebook document.');
+    }
   }
 
   @override

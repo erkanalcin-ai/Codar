@@ -60,6 +60,11 @@ final appRouter = GoRouter(
         );
       },
     ),
-    GoRoute(path: '/records', builder: (c, s) => const RecordsScreen()),
+    GoRoute(
+      path: '/records',
+      builder: (c, s) => RecordsScreen(
+        initialTab: s.uri.queryParameters['tab'],
+      ),
+    ),
   ],
 );

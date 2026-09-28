@@ -14,12 +14,18 @@ import 'package:codar/src/db/models.dart';
 import 'package:codar/src/db/repositories.dart';
 import 'package:codar/src/l10n/strings.dart';
 import 'package:codar/src/reader/html_blocks.dart';
+import 'package:codar/src/reader/highlight_range.dart';
+import 'package:codar/src/reader/page_count_index.dart';
+import 'package:codar/src/reader/reader_pagination.dart';
 import 'package:codar/src/reader/reader_image_view.dart';
 import 'package:codar/src/reader/reader_service.dart';
+import 'package:codar/src/reader/text_selection_offsets.dart';
 import 'package:codar/src/rust/frb_generated.dart/reader/content.dart'
     as reader_dto;
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show ScrollCacheExtent, SelectedContent;
+import 'package:flutter/rendering.dart'
+    show ScrollCacheExtent, SelectedContent, SelectedContentRange;
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -31,38 +37,71 @@ const highlightPalette = [
   0xFFFFA500, // orange
 ];
 
+final _readerSelectionControls = _ReaderSelectionControls();
+
+// The WCAG black/white contrast crossover is about 0.179 relative luminance.
+Color _highlightForeground(Color background) =>
+    background.computeLuminance() > 0.179 ? Colors.black : Colors.white;
+
 class ReaderThemeColors {
-  const ReaderThemeColors(this.background, this.text, this.weak);
+  const ReaderThemeColors(
+    this.background,
+    this.text,
+    this.weak,
+    this.accent,
+    this.onAccent,
+    this.progressTrack,
+  );
   final Color background;
   final Color text;
   final Color weak;
+  final Color accent;
+  final Color onAccent;
+  final Color progressTrack;
 
-  static ReaderThemeColors of(String theme, BuildContext context) {
+  bool get isDark => background.computeLuminance() < 0.1;
+
+  static ReaderThemeColors of(String theme) {
     return switch (theme) {
       'dark' => const ReaderThemeColors(
-        Color(0xFF121212),
-        Color(0xFFE8E8E8),
-        Color(0xFF9E9E9E),
+        Color(0xFF26313D),
+        Color(0xFFE7EAF0),
+        Color(0xFFADB5C1),
+        CodarColors.brightGold,
+        CodarColors.background,
+        Color(0xFF75808C),
       ),
       'sepia' => const ReaderThemeColors(
-        Color(0xFFF4ECD8),
-        Color(0xFF433422),
-        Color(0xFF8A7B5C),
+        Color(0xFFF3E0B2),
+        Color(0xFF3D301C),
+        Color(0xFF6B5731),
+        Color(0xFF755A2D),
+        Colors.white,
+        Color(0xFF8E7955),
       ),
       'warm' => const ReaderThemeColors(
-        Color(0xFFFFF8E7),
-        Color(0xFF333333),
-        Color(0xFF8D8D8D),
+        Color(0xFFFFF4DE),
+        Color(0xFF3C3325),
+        Color(0xFF71654D),
+        Color(0xFF755A2D),
+        Colors.white,
+        Color(0xFF958872),
       ),
       'black' => const ReaderThemeColors(
         Colors.black,
-        Color(0xFFD6D6D6),
-        Color(0xFF757575),
+        Color(0xFFE5E5E5),
+        Color(0xFFA0A0A0),
+        CodarColors.brightGold,
+        CodarColors.background,
+        Color(0xFF5B5B5B),
       ),
-      _ => ReaderThemeColors(
-        CodarColors.readerBackground,
-        CodarColors.readerText,
-        const Color(0xFF6D6251),
+      _ => const ReaderThemeColors(
+        Colors.white,
+        Color(0xFF25211C),
+        Color(0xFF68645E),
+        Color(0xFF755A2D),
+        Colors.white,
+        Color(0xFF92908C),
       ),
     };
   }
@@ -91,12 +130,21 @@ class ReaderScreen extends ConsumerStatefulWidget {
 }
 
 class _PendingSelection {
-  _PendingSelection({
-    required this.text,
-    required this.start,
-    required this.end,
-  });
+  _PendingSelection({required this.text, required this.ranges});
   final String text;
+  final List<_SectionSelection> ranges;
+}
+
+class _SectionSelection {
+  const _SectionSelection(this.sectionIndex, this.start, this.end);
+  final int sectionIndex;
+  final int start;
+  final int end;
+}
+
+class _BlockSelection {
+  const _BlockSelection(this.sectionIndex, this.start, this.end);
+  final int sectionIndex;
   final int start;
   final int end;
 }
@@ -119,6 +167,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   int _section = 0;
   int _sectionCount = 1;
   bool _isPdf = false;
+  bool _isCbz = false;
   final LinkedHashMap<int, _ReaderSection> _pdfSectionCache =
       LinkedHashMap<int, _ReaderSection>();
   final Map<int, Object> _pdfSectionErrors = {};
@@ -132,18 +181,17 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   List<ReaderBlock> _blocks = const [];
   List<_ReaderPage> _pages = const [];
   List<_ContinuousPage> _continuousPages = const [];
+  ReaderPageCountIndex? _continuousPageCountIndex;
   int _pageIndex = 0;
   int _continuousIndex = 0;
   String _enginePlain = '';
   int _engineChars = 0;
-  // Whitespace-normalized engine text + back-map to original offsets, so
-  // multi-line native selections resolve even when newline runs differ.
-  String _normPlain = '';
-  List<int> _normToOrig = const [];
   List<HighlightRecord> _highlights = const [];
   _PendingSelection? _pending;
-  int _pendingColor = highlightPalette[0];
-  String _granularity = 'paragraph';
+  final Map<Object, _BlockSelection> _selectedBlockRanges = {};
+  bool _selectionChanging = false;
+  bool _keepSelectionAfterHighlightUpdate = false;
+  Offset? _selectionAnchor;
   bool _loading = true;
   bool _saving = false;
   bool _controlsVisible = false;
@@ -161,8 +209,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   final _continuousPageNotifier = ValueNotifier<int>(0);
   final _regionFocus = FocusNode();
   final _regionKey = GlobalKey<SelectableRegionState>();
-  static const _pageTopPadding = 88.0;
-  static const _pageBottomPadding = 88.0;
+  static const _pageTopPadding = ReaderPagination.pageTopPadding;
+  static const _pageBottomPadding = ReaderPagination.pageBottomPadding;
 
   @override
   void initState() {
@@ -173,6 +221,10 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
       _setReaderSystemUi(ref.read(readerSettingsProvider).theme);
+      _setReaderBrightness(ref.read(readerSettingsProvider).brightness);
+    });
+    ref.listenManual(readerSettingsProvider, (previous, next) {
+      _setReaderBrightness(next.brightness);
     });
     _open();
   }
@@ -222,6 +274,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       unawaited(_closeSessionAfterSavingProgress(s));
     }
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    _setReaderBrightness(null);
     _controlsTimer?.cancel();
     _progressSaveTimer?.cancel();
     _pageController.dispose();
@@ -289,6 +342,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         _book = book;
         _sectionCount = info.sectionCount.toInt();
         _isPdf = info.format.toLowerCase() == 'pdf';
+        _isCbz = info.format.toLowerCase() == 'cbz';
       });
       await _loadBook(
         start,
@@ -322,6 +376,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     try {
       final pages = <_ContinuousPage>[];
       var preparedSectionIndex = startSection;
+      ReaderPageCountIndex? pageCountIndex;
       if (_isPdf) {
         // Resolve the opening page before building the stream so its extracted
         // reader pages can occupy separate, fixed-height scroll entries.
@@ -335,23 +390,73 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
           );
         }
       } else {
-        var openingSection = await _readContinuousSection(startSection);
+        final paginationSettings = ref.read(readerSettingsProvider);
+        final paginationViewport = MediaQuery.sizeOf(context);
+        final sectionPageCounts = List<int>.filled(_sectionCount, 1);
+        final countedSections = List<bool>.filled(_sectionCount, false);
+
+        void recordCount(_ReaderSection section) {
+          sectionPageCounts[section.index] = _isEmptyContinuousSection(section)
+              ? 0
+              : section.pages.length;
+          countedSections[section.index] = true;
+        }
+
+        var openingSection = await _readContinuousSection(
+          startSection,
+          paginationSettings: paginationSettings,
+          paginationViewport: paginationViewport,
+        );
+        recordCount(openingSection);
         if (_isEmptyContinuousSection(openingSection)) {
           for (var index = startSection + 1; index < _sectionCount; index++) {
-            openingSection = await _readContinuousSection(index);
-            if (!_isEmptyContinuousSection(openingSection)) break;
+            final candidate = await _readContinuousSection(
+              index,
+              paginationSettings: paginationSettings,
+              paginationViewport: paginationViewport,
+            );
+            recordCount(candidate);
+            if (!_isEmptyContinuousSection(candidate)) {
+              openingSection = candidate;
+              break;
+            }
           }
         }
         if (_isEmptyContinuousSection(openingSection)) {
           for (var index = startSection - 1; index >= 0; index--) {
-            openingSection = await _readContinuousSection(index);
-            if (!_isEmptyContinuousSection(openingSection)) break;
+            final candidate = await _readContinuousSection(
+              index,
+              paginationSettings: paginationSettings,
+              paginationViewport: paginationViewport,
+            );
+            recordCount(candidate);
+            if (!_isEmptyContinuousSection(candidate)) {
+              openingSection = candidate;
+              break;
+            }
           }
         }
         if (_isEmptyContinuousSection(openingSection)) {
           throw StateError('empty-book');
         }
         preparedSectionIndex = openingSection.index;
+
+        if (!_isCbz) {
+          // Count with the exact Flutter paginator, one section at a time.
+          // Only the integer counts survive this pass; the lazy stream below
+          // still starts with placeholders for every unopened section.
+          for (var index = 0; index < _sectionCount; index++) {
+            if (countedSections[index]) continue;
+            sectionPageCounts[index] = await _countContinuousSectionPages(
+              index,
+              settings: paginationSettings,
+              viewport: paginationViewport,
+            );
+            countedSections[index] = true;
+          }
+          pageCountIndex = ReaderPageCountIndex(sectionPageCounts);
+        }
+
         for (var index = 0; index < _sectionCount; index++) {
           pages.addAll(
             index == openingSection.index
@@ -395,6 +500,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       if (!mounted) return;
       setState(() {
         _continuousPages = pages;
+        _continuousPageCountIndex = pageCountIndex;
         _continuousIndex = target;
         _section = activeSection.index;
         _blocks = activeSection.blocks;
@@ -402,8 +508,6 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         _pageIndex = activeSection.pages.indexOf(activePage);
         _enginePlain = activeSection.enginePlain;
         _engineChars = activeSection.engineChars;
-        _normPlain = activeSection.normalized.text;
-        _normToOrig = activeSection.normalized.map;
         _highlights = activeSection.highlights;
         _pending = null;
         _loading = false;
@@ -443,21 +547,30 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     }
   }
 
-  Future<_ReaderSection> _readContinuousSection(int index) async {
+  Future<_ReaderSection> _readContinuousSection(
+    int index, {
+    ReaderSettingsData? paginationSettings,
+    Size? paginationViewport,
+  }) async {
     final session = _session;
     if (session == null) throw StateError('reader-closed');
-    final svc = ref.read(readerServiceProvider);
-    final settings = ref.read(readerSettingsProvider);
-    final viewport = MediaQuery.sizeOf(context);
-    final content = await svc.getContent(session, index);
+    final settings = paginationSettings ?? ref.read(readerSettingsProvider);
+    final viewport = paginationViewport ?? MediaQuery.sizeOf(context);
+    final content = await _readerSvc.getContent(session, index);
     if (!mounted) throw StateError('reader-closed');
     final blocks = _parseReaderBlocks(content);
-    final highlights = await ref
+    final storedHighlights = await ref
         .read(annotationsRepoProvider)
         .highlightsForSection(widget.bookId, index);
+    final highlights = await _resolveHighlightCoordinates(
+      index,
+      content.plainText,
+      blocks,
+      storedHighlights,
+    );
     final sectionPages = _paginateBlocks(
       blocks,
-      settings,
+      settings!,
       viewportWidth: viewport.width,
       viewportHeight: _paginationViewportHeight(viewport.height),
       engineChars: content.charCount.toInt(),
@@ -468,8 +581,27 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       pages: sectionPages,
       enginePlain: content.plainText,
       engineChars: content.charCount.toInt(),
-      normalized: _normalize(content.plainText),
       highlights: highlights,
+    );
+  }
+
+  Future<int> _countContinuousSectionPages(
+    int index, {
+    required ReaderSettingsData settings,
+    required Size viewport,
+  }) async {
+    final session = _session;
+    if (session == null) throw StateError('reader-closed');
+    final content = await _readerSvc.getContent(session, index);
+    if (!mounted) throw StateError('reader-closed');
+    final blocks = ReaderPagination.parseSectionContent(content);
+    if (blocks.isEmpty) return 0;
+    return _countPaginatedBlocks(
+      blocks,
+      settings,
+      viewportWidth: viewport.width,
+      viewportHeight: _paginationViewportHeight(viewport.height),
+      engineChars: content.charCount.toInt(),
     );
   }
 
@@ -477,25 +609,80 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       section.pages.length == 1 && section.pages.first.blocks.isEmpty;
 
   List<ReaderBlock> _parseReaderBlocks(reader_dto.SectionContent content) {
-    final images = [
-      for (final image in content.images)
-        ReaderImage(
-          source: image.source,
-          mimeType: image.mimeType,
-          data: image.data,
-          pixelWidth: image.pixelWidth,
-          pixelHeight: image.pixelHeight,
-          dataFormat: image.dataFormat,
-          left: image.left,
-          top: image.top,
-          displayWidth: image.displayWidth,
-          displayHeight: image.displayHeight,
-          pageWidth: image.pageWidth,
-          pageHeight: image.pageHeight,
-          rotationDegrees: image.rotationDegrees,
+    return ReaderTextSelectionOffsets.alignBlocks(
+      ReaderPagination.parseSectionContent(content),
+      content.plainText,
+      sourceHtml: content.html,
+    );
+  }
+
+  Future<List<HighlightRecord>> _resolveHighlightCoordinates(
+    int sectionIndex,
+    String sourceText,
+    List<ReaderBlock> blocks,
+    List<HighlightRecord> storedHighlights,
+  ) async {
+    final annotations = ref.read(annotationsRepoProvider);
+    final resolved = <HighlightRecord>[];
+    for (final highlight in storedHighlights) {
+      final range = ReaderTextSelectionOffsets.resolveStoredHighlightRange(
+        sourceText,
+        blocks,
+        start: highlight.startOffset,
+        end: highlight.endOffset,
+        quotedText: highlight.quotedText,
+        offsetUnit: highlight.offsetUnit,
+      );
+      if (range == null) {
+        // Keep the persisted row intact, but do not paint an uncertain range.
+        debugPrint(
+          'Reader highlight ${highlight.id} could not be aligned in '
+          'section $sectionIndex; stored coordinates were preserved.',
+        );
+        continue;
+      }
+      if (highlight.offsetUnit != 'rust_scalar' && highlight.id != null) {
+        await annotations.updateHighlightOffsetsAsRustScalars(
+          highlight.id!,
+          range.$1,
+          range.$2,
+        );
+      }
+      resolved.add(
+        HighlightRecord(
+          id: highlight.id,
+          bookId: highlight.bookId,
+          sectionIndex: highlight.sectionIndex,
+          startOffset: range.$1,
+          endOffset: range.$2,
+          cfi: highlight.cfi,
+          color: highlight.color,
+          quotedText: highlight.quotedText,
+          note: highlight.note,
+          offsetUnit: 'rust_scalar',
         ),
-    ];
-    return parseSectionHtml(content.html, images: images);
+      );
+    }
+    return resolved;
+  }
+
+  List<ReaderBlock>? _blocksForSection(int index) {
+    if (_isPdf) return _pdfSectionCache[index]?.blocks;
+    if (_continuousPages.isEmpty) {
+      return index == _section ? _blocks : null;
+    }
+    for (final page in _continuousPages) {
+      if (page.section.index == index && !page.section.isPlaceholder) {
+        return page.section.blocks;
+      }
+    }
+    return null;
+  }
+
+  String _renderedTextForSectionRange(int index, int start, int end) {
+    final blocks = _blocksForSection(index);
+    if (blocks == null) return '';
+    return ReaderTextSelectionOffsets.renderedTextForRange(blocks, start, end);
   }
 
   List<_ContinuousPage> _continuousEntriesForSection(_ReaderSection section) =>
@@ -515,7 +702,6 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       pages: const [_ReaderPage(blocks: [], startOffset: 0)],
       enginePlain: '',
       engineChars: 0,
-      normalized: _Normalized('', const []),
       highlights: const [],
       isPlaceholder: true,
     );
@@ -577,6 +763,12 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     }
     final section = await _readContinuousSection(index);
     if (!mounted) return;
+    assert(
+      _continuousPageCountIndex == null ||
+          _continuousPageCountIndex!.sectionPageCounts[index] ==
+              (_isEmptyContinuousSection(section) ? 0 : section.pages.length),
+      'Lazy section pagination changed after the book page count was fixed.',
+    );
     var endIndex = firstIndex;
     while (endIndex < _continuousPages.length &&
         _continuousPages[endIndex].section.index == index) {
@@ -622,8 +814,6 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
             .toInt();
         _enginePlain = currentSection.enginePlain;
         _engineChars = currentSection.engineChars;
-        _normPlain = currentSection.normalized.text;
-        _normToOrig = currentSection.normalized.map;
         _highlights = currentSection.highlights;
       }
     });
@@ -663,11 +853,16 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       final svc = ref.read(readerServiceProvider);
       final content = await svc.getContent(session, index);
       final blocks = _parseReaderBlocks(content);
-      final highlights = await ref
+      final storedHighlights = await ref
           .read(annotationsRepoProvider)
           .highlightsForSection(widget.bookId, index);
+      final highlights = await _resolveHighlightCoordinates(
+        index,
+        content.plainText,
+        blocks,
+        storedHighlights,
+      );
       if (!mounted) return;
-      final norm = _normalize(content.plainText);
       final settings = ref.read(readerSettingsProvider);
       final viewport = MediaQuery.sizeOf(context);
       final pages = _paginateBlocks(
@@ -708,8 +903,6 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         _pageIndex = page;
         _enginePlain = content.plainText;
         _engineChars = content.charCount.toInt();
-        _normPlain = norm.text;
-        _normToOrig = norm.map;
         _highlights = highlights;
         _pending = null;
         _loading = false;
@@ -743,7 +936,6 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     pages: const [_ReaderPage(blocks: [], startOffset: 0)],
     enginePlain: '',
     engineChars: 0,
-    normalized: _Normalized('', const []),
     highlights: const [],
   );
 
@@ -775,10 +967,15 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     final settings = ref.read(readerSettingsProvider);
     final content = await _readerSvc.getContent(session, index);
     final blocks = _parseReaderBlocks(content);
-    final highlights = await ref
+    final storedHighlights = await ref
         .read(annotationsRepoProvider)
         .highlightsForSection(widget.bookId, index);
-    final normalized = _normalize(content.plainText);
+    final highlights = await _resolveHighlightCoordinates(
+      index,
+      content.plainText,
+      blocks,
+      storedHighlights,
+    );
     final pages = _paginateBlocks(
       blocks,
       settings,
@@ -792,7 +989,6 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       pages: pages,
       enginePlain: content.plainText,
       engineChars: content.charCount.toInt(),
-      normalized: normalized,
       highlights: highlights,
     );
     return section;
@@ -882,8 +1078,6 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
           _pageIndex = activePageIndex;
           _enginePlain = activeSection.enginePlain;
           _engineChars = activeSection.engineChars;
-          _normPlain = activeSection.normalized.text;
-          _normToOrig = activeSection.normalized.map;
           _highlights = activeSection.highlights;
         }
       });
@@ -979,8 +1173,6 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         _pages = resolvedSection.pages;
         _enginePlain = resolvedSection.enginePlain;
         _engineChars = resolvedSection.engineChars;
-        _normPlain = resolvedSection.normalized.text;
-        _normToOrig = resolvedSection.normalized.map;
         _highlights = resolvedSection.highlights;
         _pending = null;
       });
@@ -1095,178 +1287,27 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     required double viewportWidth,
     required double viewportHeight,
     required int engineChars,
-  }) {
-    final margin = settings.marginPx.toDouble().clamp(8.0, 96.0).toDouble();
-    final width = math.max(120.0, viewportWidth - margin * 2).toDouble();
-    final height = math.max(220.0, viewportHeight - 42.0).toDouble();
-    final align = switch (settings.alignment) {
-      'center' => TextAlign.center,
-      'justify' => TextAlign.justify,
-      _ => TextAlign.start,
-    };
-    final parsedLength = blocks.fold<int>(
-      0,
-      (total, block) => total + block.plainText.length,
-    );
-    final rawPages = <_RawReaderPage>[];
-    final current = <ReaderBlock>[];
-    var used = 0.0;
-    var currentStart = 0;
-    var parsedCursor = 0;
+  }) => ReaderPagination.paginate(
+    blocks,
+    settings,
+    viewportWidth: viewportWidth,
+    viewportHeight: viewportHeight,
+    engineChars: engineChars,
+  );
 
-    void flush() {
-      if (current.isEmpty) return;
-      rawPages.add(_RawReaderPage(List.of(current), currentStart));
-      current.clear();
-      used = 0;
-    }
-
-    for (final block in blocks) {
-      if (block is ImageBlock) {
-        flush();
-        if (block.images.isNotEmpty) {
-          rawPages.add(_RawReaderPage([block], parsedCursor));
-        }
-        continue;
-      }
-      final textBlock = block as TextBlock;
-      final text = textBlock.plainText;
-      if (text.isEmpty) continue;
-      var cursor = 0;
-      while (cursor < text.length) {
-        final spacing = current.isEmpty ? 0.0 : 12.0;
-        final available = height - used - spacing;
-        final end = _fitEnd(
-          textBlock,
-          cursor,
-          width,
-          math.max(1.0, available).toDouble(),
-          settings,
-          align,
-        );
-        if (end <= cursor) {
-          if (current.isNotEmpty) {
-            flush();
-            continue;
-          }
-          // A single glyph can still exceed the calculated budget on a very
-          // small viewport or with a large accessibility font. Keep progress
-          // moving and let the page clip only that unavoidable glyph.
-          currentStart = parsedCursor + cursor;
-          final forcedEnd = math.min(cursor + 1, text.length);
-          final piece = _sliceBlock(textBlock, cursor, forcedEnd);
-          current.add(piece);
-          used = _measureBlock(piece, width, settings, align);
-          cursor = forcedEnd;
-          if (cursor < text.length) flush();
-          continue;
-        }
-        if (current.isEmpty) currentStart = parsedCursor + cursor;
-        final piece = _sliceBlock(textBlock, cursor, end);
-        current.add(piece);
-        used += spacing + _measureBlock(piece, width, settings, align);
-        cursor = end;
-        if (cursor < text.length) flush();
-      }
-      parsedCursor += text.length;
-    }
-    flush();
-    if (rawPages.isEmpty) {
-      return [const _ReaderPage(blocks: [], startOffset: 0)];
-    }
-    return [
-      for (final page in rawPages)
-        _ReaderPage(
-          blocks: page.blocks,
-          startOffset: parsedLength == 0
-              ? 0
-              : ((page.start / parsedLength) * engineChars)
-                    .round()
-                    .clamp(0, engineChars)
-                    .toInt(),
-        ),
-    ];
-  }
-
-  int _fitEnd(
-    TextBlock block,
-    int start,
-    double width,
-    double available,
-    ReaderSettingsData settings,
-    TextAlign align,
-  ) {
-    final text = block.plainText;
-    final remaining = text.substring(start);
-    if (_measureText(block, remaining, width, settings, align) <= available) {
-      return text.length;
-    }
-    var low = start + 1;
-    var high = text.length;
-    var best = start;
-    while (low <= high) {
-      final mid = (low + high) ~/ 2;
-      final candidate = text.substring(start, mid);
-      if (_measureText(block, candidate, width, settings, align) <= available) {
-        best = mid;
-        low = mid + 1;
-      } else {
-        high = mid - 1;
-      }
-    }
-    if (best <= start) return start;
-    var boundary = best;
-    while (boundary > start && !RegExp(r'\s').hasMatch(text[boundary - 1])) {
-      boundary--;
-    }
-    return boundary > start ? boundary : best;
-  }
-
-  double _measureBlock(
-    TextBlock block,
-    double width,
-    ReaderSettingsData settings,
-    TextAlign align,
-  ) => _measureText(block, block.plainText, width, settings, align);
-
-  double _measureText(
-    TextBlock block,
-    String text,
-    double width,
-    ReaderSettingsData settings,
-    TextAlign align,
-  ) {
-    final style = _styleForBlock(block, settings, const Color(0xFF111111));
-    final prefix = block.kind == 'li' ? '• ' : '';
-    final painter = TextPainter(
-      text: TextSpan(text: '$prefix$text', style: style),
-      textAlign: align,
-      textDirection: TextDirection.ltr,
-    )..layout(maxWidth: width);
-    return painter.height;
-  }
-
-  TextBlock _sliceBlock(TextBlock block, int start, int end) {
-    final parts = <SpanPart>[];
-    var cursor = 0;
-    for (final part in block.parts) {
-      final partEnd = cursor + part.text.length;
-      final from = math.max(start, cursor);
-      final to = math.min(end, partEnd);
-      if (to > from) {
-        parts.add(
-          SpanPart(
-            part.text.substring(from - cursor, to - cursor),
-            bold: part.bold,
-            italic: part.italic,
-          ),
-        );
-      }
-      cursor = partEnd;
-      if (cursor >= end) break;
-    }
-    return TextBlock(kind: block.kind, parts: parts);
-  }
+  int _countPaginatedBlocks(
+    List<ReaderBlock> blocks,
+    ReaderSettingsData settings, {
+    required double viewportWidth,
+    required double viewportHeight,
+    required int engineChars,
+  }) => ReaderPagination.countPages(
+    blocks,
+    settings,
+    viewportWidth: viewportWidth,
+    viewportHeight: viewportHeight,
+    engineChars: engineChars,
+  );
 
   int _pageForOffset(List<_ReaderPage> pages, int offset) {
     if (pages.length <= 1 || offset <= 0) return 0;
@@ -1287,29 +1328,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   }
 
   static double _paginationViewportHeight(double height) =>
-      height - _pageTopPadding - _pageBottomPadding + 42.0;
-
-  static _Normalized _normalize(String s) {
-    final buf = StringBuffer();
-    final map = <int>[];
-    var inSpace = true; // trim leading
-    for (var i = 0; i < s.length; i++) {
-      final ch = s[i];
-      final space = ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t';
-      if (space) {
-        inSpace = true;
-        continue;
-      }
-      if (inSpace && buf.isNotEmpty) {
-        buf.write(' ');
-        map.add(i);
-      }
-      inSpace = false;
-      buf.write(ch);
-      map.add(i);
-    }
-    return _Normalized(buf.toString(), map);
-  }
+      ReaderPagination.paginationViewportHeight(height);
 
   static String _extOf(String name) {
     final i = name.lastIndexOf('.');
@@ -1317,112 +1336,316 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     return name.substring(i + 1).toLowerCase();
   }
 
-  // ---- selection & highlights ----
-
-  /// Map a raw selection to engine plain-text offsets via quoted text.
-  /// Whitespace is normalized on both sides; offsets map back to the
-  /// original engine text so CFI anchors stay exact.
-  _PendingSelection? _resolveSelection(String selected) {
-    final needle = _normalize(selected).text.trim();
-    if (needle.isEmpty || _normPlain.isEmpty) return null;
-    final idx = _normPlain.indexOf(needle);
-    if (idx < 0) return null;
-    final start = _normToOrig[idx];
-    final end =
-        _normToOrig[(idx + needle.length - 1).clamp(
-          0,
-          _normToOrig.length - 1,
-        )] +
-        1;
-    return _PendingSelection(
-      text: _enginePlain.substring(start, end.clamp(0, _enginePlain.length)),
-      start: start,
-      end: end.clamp(0, _enginePlain.length),
-    );
-  }
+  // ---- selection, highlights and quotes ----
 
   void _onSelectionChanged(SelectedContent? content) {
-    final text = content?.plainText ?? '';
-    if (text.trim().isEmpty) {
-      setState(() => _pending = null);
+    if ((content?.plainText ?? '').trim().isEmpty) {
+      _selectedBlockRanges.clear();
+      if (mounted) {
+        setState(() {
+          _pending = null;
+          _selectionAnchor = null;
+        });
+      }
       return;
     }
-    var resolved = _resolveSelection(text);
-    if (resolved != null && _granularity != 'paragraph') {
-      resolved = _expand(resolved, _granularity);
-    }
-    setState(() => _pending = resolved);
-    if (resolved != null) _showControls();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_selectionChanging) _refreshPendingSelection();
+    });
   }
 
-  _PendingSelection _expand(_PendingSelection sel, String mode) {
-    bool isWordChar(String ch) =>
-        RegExp(r'[\p{L}\p{N}_]', unicode: true).hasMatch(ch);
-    int s = sel.start.clamp(0, _enginePlain.length);
-    int e = sel.end.clamp(0, _enginePlain.length);
-    if (mode == 'word') {
-      while (s > 0 && isWordChar(_enginePlain[s - 1])) {
-        s--;
-      }
-      while (e < _enginePlain.length && isWordChar(_enginePlain[e])) {
-        e++;
-      }
-    } else if (mode == 'sentence') {
-      const ends = '.!?…';
-      while (s > 0 && !ends.contains(_enginePlain[s - 1])) {
-        s--;
-      }
-      while (e < _enginePlain.length && !ends.contains(_enginePlain[e - 1])) {
-        e++;
+  void _onSelectionStatusChanged(SelectableRegionSelectionStatus status) {
+    if (status == SelectableRegionSelectionStatus.changing) {
+      _keepSelectionAfterHighlightUpdate = false;
+    }
+    _selectionChanging = status == SelectableRegionSelectionStatus.changing;
+    if (_selectionChanging) {
+      if (_pending != null && mounted) setState(() => _pending = null);
+    } else {
+      _refreshPendingSelection();
+    }
+  }
+
+  void _onBlockSelectionChanged(
+    Object blockKey,
+    int sectionIndex,
+    TextBlock block,
+    SelectedContentRange? range,
+  ) {
+    // Repainting TextSpan boundaries after a highlight can make Flutter emit
+    // a transient local range for the same live selection. Keep the source
+    // range that the user acted on until their next selection gesture.
+    if (_keepSelectionAfterHighlightUpdate) return;
+    if (range == null) {
+      _selectedBlockRanges.remove(blockKey);
+    } else {
+      final mapped = ReaderTextSelectionOffsets.sourceRangeFor(
+        block,
+        range.startOffset,
+        range.endOffset,
+      );
+      if (mapped == null) {
+        _selectedBlockRanges.remove(blockKey);
+      } else {
+        _selectedBlockRanges[blockKey] = _BlockSelection(
+          sectionIndex,
+          mapped.$1,
+          mapped.$2,
+        );
       }
     }
-    final text = _enginePlain.substring(s, e).trim();
-    if (text.isEmpty) return sel;
-    final off = _enginePlain.indexOf(text, s);
-    return _PendingSelection(
-      text: text,
-      start: off < 0 ? s : off,
-      end: (off < 0 ? s : off) + text.length,
+    if (!_selectionChanging) _refreshPendingSelection();
+  }
+
+  void _refreshPendingSelection() {
+    if (!mounted ||
+        _selectionChanging ||
+        _keepSelectionAfterHighlightUpdate ||
+        _selectedBlockRanges.isEmpty) {
+      return;
+    }
+    final grouped = <int, (int, int)>{};
+    for (final selected in _selectedBlockRanges.values) {
+      final current = grouped[selected.sectionIndex];
+      grouped[selected.sectionIndex] = current == null
+          ? (selected.start, selected.end)
+          : (
+              math.min(current.$1, selected.start),
+              math.max(current.$2, selected.end),
+            );
+    }
+    final ranges = [
+      for (final entry in grouped.entries)
+        _SectionSelection(entry.key, entry.value.$1, entry.value.$2),
+    ]..sort((a, b) => a.sectionIndex.compareTo(b.sectionIndex));
+    final snippets = <String>[];
+    for (final range in ranges) {
+      snippets.add(
+        _renderedTextForSectionRange(
+          range.sectionIndex,
+          range.start,
+          range.end,
+        ),
+      );
+    }
+    final text = snippets.join('\n').trim();
+    if (text.isEmpty) return;
+    setState(() => _pending = _PendingSelection(text: text, ranges: ranges));
+  }
+
+  String? _sourceTextForSection(int index) {
+    if (index == _section && _enginePlain.isNotEmpty) return _enginePlain;
+    final loaded = _continuousPages.where(
+      (page) => page.section.index == index && !page.section.isPlaceholder,
+    );
+    if (loaded.isNotEmpty) return loaded.first.section.enginePlain;
+    return _pdfSectionCache[index]?.enginePlain;
+  }
+
+  List<HighlightRecord> _highlightsForSection(int index) {
+    if (index == _section) return _highlights;
+    final loaded = _continuousPages.where(
+      (page) => page.section.index == index && !page.section.isPlaceholder,
+    );
+    if (loaded.isNotEmpty) return loaded.first.section.highlights;
+    return _pdfSectionCache[index]?.highlights ?? const [];
+  }
+
+  int? _uniformSelectedColor() {
+    final pending = _pending;
+    if (pending == null || pending.ranges.isEmpty) return null;
+    int? selectedColor;
+    for (final selection in pending.ranges) {
+      final color = uniformHighlightColor(
+        HighlightRange(selection.start, selection.end),
+        _highlightsForSection(selection.sectionIndex).map(
+          (item) =>
+              HighlightColorRange(item.startOffset, item.endOffset, item.color),
+        ),
+      );
+      if (color == null || (selectedColor != null && selectedColor != color)) {
+        return null;
+      }
+      selectedColor = color;
+    }
+    return selectedColor;
+  }
+
+  bool _selectionIntersectsHighlight() {
+    final pending = _pending;
+    if (pending == null) return false;
+    return pending.ranges.any(
+      (selection) => _highlightsForSection(selection.sectionIndex).any(
+        (highlight) =>
+            highlight.startOffset < selection.end &&
+            highlight.endOffset > selection.start,
+      ),
     );
   }
 
-  Future<void> _saveHighlight({String note = ''}) async {
+  Future<void> _saveQuote() async {
     final pending = _pending;
     final session = _session;
-    if (pending == null || session == null || _saving) return;
+    if (pending == null ||
+        pending.ranges.isEmpty ||
+        session == null ||
+        _saving) {
+      return;
+    }
     setState(() => _saving = true);
     try {
-      final svc = ref.read(readerServiceProvider);
-      final locator = await svc.getLocator(session, _section, pending.start);
-      final cfi = _cfiOf(locator);
+      final first = pending.ranges.first;
+      final locator = await _readerSvc.getLocator(
+        session,
+        first.sectionIndex,
+        first.start,
+      );
       await ref
           .read(annotationsRepoProvider)
-          .addHighlight(
-            HighlightRecord(
+          .addQuote(
+            QuoteRecord(
               bookId: widget.bookId,
-              sectionIndex: _section,
-              startOffset: pending.start,
-              endOffset: pending.end,
-              cfi: cfi,
-              color: _pendingColor,
+              sectionIndex: first.sectionIndex,
+              charOffset: first.start,
+              cfi: _cfiOf(locator),
               quotedText: pending.text,
-              note: note,
             ),
           );
-      final fresh = await ref
-          .read(annotationsRepoProvider)
-          .highlightsForSection(widget.bookId, _section);
-      _regionKey.currentState?.clearSelection();
-      if (mounted) {
-        setState(() {
-          _highlights = fresh;
-          _replaceCachedSectionHighlights(_section, fresh);
-          _pending = null;
-          _saving = false;
-        });
-      }
+      _clearSelection();
+      if (mounted) setState(() => _saving = false);
     } catch (_) {
       if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _applySelectionColor(int color, {bool clear = false}) async {
+    final pending = _pending;
+    final session = _session;
+    if (pending == null ||
+        pending.ranges.isEmpty ||
+        session == null ||
+        _saving) {
+      return;
+    }
+    final remove = clear || _uniformSelectedColor() == color;
+    _keepSelectionAfterHighlightUpdate = true;
+    setState(() => _saving = true);
+    try {
+      final annotations = ref.read(annotationsRepoProvider);
+      for (final selection in pending.ranges) {
+        final source = _sourceTextForSection(selection.sectionIndex);
+        final sectionBlocks = _blocksForSection(selection.sectionIndex);
+        if (source == null ||
+            sectionBlocks == null ||
+            selection.start >= selection.end) {
+          continue;
+        }
+        final storedExisting = await annotations.highlightsForSection(
+          widget.bookId,
+          selection.sectionIndex,
+        );
+        final existing = await _resolveHighlightCoordinates(
+          selection.sectionIndex,
+          source,
+          sectionBlocks,
+          storedExisting,
+        );
+        final selectedRange = HighlightRange(selection.start, selection.end);
+        for (final highlight in existing) {
+          final id = highlight.id;
+          if (id == null ||
+              highlight.startOffset >= selection.end ||
+              highlight.endOffset <= selection.start) {
+            continue;
+          }
+          final fragments = subtractHighlightRange(
+            HighlightRange(highlight.startOffset, highlight.endOffset),
+            selectedRange,
+          );
+          if (fragments.isEmpty) {
+            await annotations.deleteHighlight(id);
+            continue;
+          }
+          for (var i = 0; i < fragments.length; i++) {
+            final fragment = fragments[i];
+            final locator = await _readerSvc.getLocator(
+              session,
+              selection.sectionIndex,
+              fragment.start,
+            );
+            final updated = HighlightRecord(
+              id: i == 0 ? id : null,
+              bookId: widget.bookId,
+              sectionIndex: selection.sectionIndex,
+              startOffset: fragment.start,
+              endOffset: fragment.end,
+              cfi: _cfiOf(locator),
+              color: highlight.color,
+              quotedText: _renderedTextForSectionRange(
+                selection.sectionIndex,
+                fragment.start,
+                fragment.end,
+              ),
+              note: i == 0 ? highlight.note : '',
+            );
+            if (i == 0) {
+              await annotations.updateHighlightRange(id, updated);
+            } else {
+              await annotations.addHighlight(updated);
+            }
+          }
+        }
+        if (!remove) {
+          final locator = await _readerSvc.getLocator(
+            session,
+            selection.sectionIndex,
+            selection.start,
+          );
+          await annotations.addHighlight(
+            HighlightRecord(
+              bookId: widget.bookId,
+              sectionIndex: selection.sectionIndex,
+              startOffset: selection.start,
+              endOffset: selection.end,
+              cfi: _cfiOf(locator),
+              color: color,
+              quotedText: _renderedTextForSectionRange(
+                selection.sectionIndex,
+                selection.start,
+                selection.end,
+              ),
+              note: '',
+            ),
+          );
+        }
+        final storedFresh = await annotations.highlightsForSection(
+          widget.bookId,
+          selection.sectionIndex,
+        );
+        final fresh = await _resolveHighlightCoordinates(
+          selection.sectionIndex,
+          source,
+          sectionBlocks,
+          storedFresh,
+        );
+        _replaceCachedSectionHighlights(selection.sectionIndex, fresh);
+        if (selection.sectionIndex == _section) _highlights = fresh;
+      }
+      if (mounted) setState(() => _saving = false);
+    } catch (_) {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  void _clearSelection() {
+    _keepSelectionAfterHighlightUpdate = false;
+    _selectedBlockRanges.clear();
+    _regionKey.currentState?.clearSelection();
+    if (mounted) {
+      setState(() {
+        _pending = null;
+        _selectionAnchor = null;
+      });
     }
   }
 
@@ -1459,8 +1682,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   }
 
   void _cancelPending() {
-    _regionKey.currentState?.clearSelection();
-    setState(() => _pending = null);
+    _clearSelection();
   }
 
   static String _cfiOf(String locatorJson) {
@@ -1552,22 +1774,25 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     if (content == null || content.isEmpty) return;
     try {
       final svc = ref.read(readerServiceProvider);
-      final offset = pending?.start ?? _currentPageOffset;
-      final locator = await svc.getLocator(session, _section, offset);
+      final selection = pending != null && pending.ranges.isNotEmpty
+          ? pending.ranges.first
+          : null;
+      final offset = selection?.start ?? _currentPageOffset;
+      final sectionIndex = selection?.sectionIndex ?? _section;
+      final locator = await svc.getLocator(session, sectionIndex, offset);
       await ref
           .read(annotationsRepoProvider)
           .addNote(
             NoteRecord(
               bookId: widget.bookId,
-              sectionIndex: _section,
+              sectionIndex: sectionIndex,
               cfi: _cfiOf(locator),
               charOffset: offset,
               content: content,
               quotedText: pending?.text ?? '',
             ),
           );
-      _regionKey.currentState?.clearSelection();
-      if (mounted) setState(() => _pending = null);
+      _clearSelection();
     } catch (_) {}
   }
 
@@ -1621,6 +1846,9 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.sizeOf(context).height * .78,
+      ),
       builder: (sheetContext) => StatefulBuilder(
         builder: (sheetContext, setSheetState) {
           void update(ReaderSettingsData next) {
@@ -1632,82 +1860,121 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
           }
 
           return SafeArea(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    tr(locale, 'readerSettings'),
-                    style: Theme.of(sheetContext).textTheme.titleLarge
-                        ?.copyWith(fontWeight: FontWeight.w800),
-                  ),
-                  const SizedBox(height: 14),
-                  Row(
-                    children: [
-                      Expanded(child: Text(tr(locale, 'fontFamily'))),
-                      DropdownButton<String>(
-                        value: draft.fontFamily,
-                        underline: const SizedBox.shrink(),
-                        items: const ['System', 'Serif', 'Monospace']
-                            .map(
-                              (font) => DropdownMenuItem(
-                                value: font,
-                                child: Text(font),
-                              ),
-                            )
-                            .toList(),
-                        onChanged: (value) => update(
-                          draft.copyWith(fontFamily: value ?? 'System'),
+            child: SizedBox(
+              height: MediaQuery.sizeOf(sheetContext).height * .72,
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      tr(locale, 'readerSettings'),
+                      style: Theme.of(sheetContext).textTheme.titleLarge
+                          ?.copyWith(fontWeight: FontWeight.w800),
+                    ),
+                    const SizedBox(height: 14),
+                    Row(
+                      children: [
+                        Expanded(child: Text(tr(locale, 'fontFamily'))),
+                        DropdownButton<String>(
+                          value: draft.fontFamily,
+                          underline: const SizedBox.shrink(),
+                          items:
+                              const [
+                                    'System',
+                                    'Serif',
+                                    'Monospace',
+                                    'Literata',
+                                    'Lora',
+                                    'Atkinson Hyperlegible',
+                                  ]
+                                  .map(
+                                    (font) => DropdownMenuItem(
+                                      value: font,
+                                      child: Text(font),
+                                    ),
+                                  )
+                                  .toList(),
+                          onChanged: (value) => update(
+                            draft.copyWith(fontFamily: value ?? 'System'),
+                          ),
                         ),
+                      ],
+                    ),
+                    _ReaderSliderRow(
+                      label: tr(locale, 'fontSize'),
+                      value: draft.fontSizePx.toDouble(),
+                      min: 12,
+                      max: 32,
+                      divisions: 20,
+                      display: '${draft.fontSizePx}',
+                      onChanged: (value) =>
+                          update(draft.copyWith(fontSizePx: value.round())),
+                    ),
+                    _ReaderSliderRow(
+                      label: tr(locale, 'lineHeight'),
+                      value: draft.lineHeight,
+                      min: 1,
+                      max: 2.2,
+                      divisions: 12,
+                      display: draft.lineHeight.toStringAsFixed(2),
+                      onChanged: (value) =>
+                          update(draft.copyWith(lineHeight: value)),
+                    ),
+                    _ReaderSliderRow(
+                      label: tr(locale, 'brightness'),
+                      value: draft.brightness ?? 1.0,
+                      min: 0.05,
+                      max: 1,
+                      divisions: 95,
+                      display: draft.brightness == null
+                          ? tr(locale, 'systemBrightness')
+                          : '${(draft.brightness! * 100).round()}%',
+                      onChanged: (value) =>
+                          update(draft.copyWith(brightness: value)),
+                    ),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: TextButton(
+                        onPressed: draft.brightness == null
+                            ? null
+                            : () =>
+                                  update(draft.copyWith(clearBrightness: true)),
+                        child: Text(tr(locale, 'systemBrightness')),
                       ),
-                    ],
-                  ),
-                  _ReaderSliderRow(
-                    label: tr(locale, 'fontSize'),
-                    value: draft.fontSizePx.toDouble(),
-                    min: 12,
-                    max: 32,
-                    divisions: 20,
-                    display: '${draft.fontSizePx}',
-                    onChanged: (value) =>
-                        update(draft.copyWith(fontSizePx: value.round())),
-                  ),
-                  _ReaderSliderRow(
-                    label: tr(locale, 'lineHeight'),
-                    value: draft.lineHeight,
-                    min: 1,
-                    max: 2.2,
-                    divisions: 12,
-                    display: draft.lineHeight.toStringAsFixed(2),
-                    onChanged: (value) =>
-                        update(draft.copyWith(lineHeight: value)),
-                  ),
-                  Row(
-                    children: [
-                      Expanded(child: Text(tr(locale, 'theme'))),
-                      DropdownButton<String>(
-                        value: draft.theme,
-                        underline: const SizedBox.shrink(),
-                        items: [
-                          for (final theme in [
-                            'light',
-                            'dark',
-                            'sepia',
-                            'warm',
-                            'black',
-                          ])
-                            DropdownMenuItem(
-                              value: theme,
-                              child: Text(tr(locale, 'theme${_cap(theme)}')),
-                            ),
-                        ],
-                        onChanged: (value) =>
-                            update(draft.copyWith(theme: value ?? 'light')),
-                      ),
-                    ],
-                  ),
-                ],
+                    ),
+                    _ReaderAlignmentRow(
+                      locale: locale,
+                      alignment: draft.alignment,
+                      onChanged: (value) =>
+                          update(draft.copyWith(alignment: value)),
+                    ),
+                    Row(
+                      children: [
+                        Expanded(child: Text(tr(locale, 'theme'))),
+                        DropdownButton<String>(
+                          value: draft.theme,
+                          underline: const SizedBox.shrink(),
+                          items: [
+                            for (final theme in [
+                              'light',
+                              'dark',
+                              'sepia',
+                              'warm',
+                              'black',
+                            ])
+                              DropdownMenuItem(
+                                value: theme,
+                                child: Text(tr(locale, 'theme${_cap(theme)}')),
+                              ),
+                          ],
+                          onChanged: (value) =>
+                              update(draft.copyWith(theme: value ?? 'light')),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
           );
@@ -1721,7 +1988,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
 
   void _setReaderSystemUi(String theme) {
     final lightStatusBar = theme != 'dark' && theme != 'black';
-    final colors = ReaderThemeColors.of(theme, context);
+    final colors = ReaderThemeColors.of(theme);
     final style = lightStatusBar
         ? SystemUiOverlayStyle(
             statusBarColor: Colors.transparent,
@@ -1746,6 +2013,16 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     );
   }
 
+  void _setReaderBrightness(double? brightness) {
+    unawaited(
+      const MethodChannel('codar/storage')
+          .invokeMethod<void>('setReaderBrightness', <String, Object>{
+            'brightness': brightness ?? -1.0,
+          })
+          .catchError((Object _) {}),
+    );
+  }
+
   int get _currentPageOffset {
     if (_continuousPages.isNotEmpty) {
       return _continuousPages[_continuousIndex].page.startOffset;
@@ -1756,14 +2033,25 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   }
 
   int _displayContinuousPageIndex(int index) {
-    if (_isPdf && index >= 0 && index < _continuousPages.length) {
+    if ((_isPdf || _isCbz) && index >= 0 && index < _continuousPages.length) {
       return _continuousPages[index].section.index;
+    }
+    if (index >= 0 && index < _continuousPages.length) {
+      final entry = _continuousPages[index];
+      final pageCountIndex = _continuousPageCountIndex;
+      if (pageCountIndex != null) {
+        return pageCountIndex.pageIndexFor(
+          entry.section.index,
+          entry.sectionPageIndex,
+        );
+      }
     }
     return index;
   }
 
-  int get _displayContinuousPageCount =>
-      _isPdf ? _sectionCount : _continuousPages.length;
+  int get _displayContinuousPageCount => (_isPdf || _isCbz)
+      ? _sectionCount
+      : _continuousPageCountIndex?.totalPages ?? _continuousPages.length;
 
   void _scheduleControlsHide() {
     _controlsTimer?.cancel();
@@ -1795,6 +2083,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   void _onReaderPointerUp(PointerUpEvent event) {
     final start = _pointerDown;
     _pointerDown = null;
+    if (_pending != null || _selectionChanging) return;
+    _selectionAnchor = event.localPosition;
     if (start == null || (event.position - start).distance > 12) return;
     if (_controlsVisible) {
       final height = MediaQuery.sizeOf(context).height;
@@ -1837,7 +2127,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   Widget build(BuildContext context) {
     final locale = ref.watch(localeProvider);
     final settings = ref.watch(readerSettingsProvider);
-    final colors = ReaderThemeColors.of(settings.theme, context);
+    final colors = ReaderThemeColors.of(settings.theme);
     final lightSystemBars =
         settings.theme != 'dark' && settings.theme != 'black';
     final overlayStyle = SystemUiOverlayStyle(
@@ -1854,29 +2144,79 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     );
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: overlayStyle,
-      child: Scaffold(
-        backgroundColor: colors.background,
-        body: Listener(
-          behavior: HitTestBehavior.opaque,
-          onPointerDown: _onReaderPointerDown,
-          onPointerUp: _onReaderPointerUp,
-          onPointerCancel: (_) => _pointerDown = null,
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              _buildBody(locale, settings, colors),
-              if (_pending != null)
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  child: _highlightBar(locale, colors),
+      child: Theme(
+        data: _themeForReader(Theme.of(context), colors),
+        child: Scaffold(
+          backgroundColor: colors.background,
+          body: Listener(
+            behavior: HitTestBehavior.opaque,
+            onPointerDown: _onReaderPointerDown,
+            onPointerUp: _onReaderPointerUp,
+            onPointerCancel: (_) => _pointerDown = null,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                SelectableRegion(
+                  key: _regionKey,
+                  focusNode: _regionFocus,
+                  selectionControls: _readerSelectionControls,
+                  contextMenuBuilder: (context, state) =>
+                      const SizedBox.shrink(),
+                  onSelectionChanged: _onSelectionChanged,
+                  child: _SelectionStatusObserver(
+                    onChanged: _onSelectionStatusChanged,
+                    child: _buildBody(locale, settings, colors),
+                  ),
                 ),
-              _readerTopControls(locale, colors),
-              if (_pending == null) _readerBottomControls(locale, colors),
-            ],
+                if (_pending != null && !_selectionChanging)
+                  _positionedHighlightPanel(locale, colors),
+                _readerTopControls(locale, colors),
+                if (_pending == null) _readerBottomControls(locale, colors),
+              ],
+            ),
           ),
         ),
+      ),
+    );
+  }
+
+  ThemeData _themeForReader(ThemeData base, ReaderThemeColors colors) {
+    final brightness = colors.isDark ? Brightness.dark : Brightness.light;
+    final colorScheme = base.colorScheme.copyWith(
+      brightness: brightness,
+      primary: colors.accent,
+      onPrimary: colors.onAccent,
+      secondary: colors.accent,
+      onSecondary: colors.onAccent,
+      tertiary: colors.accent,
+      onTertiary: colors.onAccent,
+      surface: colors.background,
+      onSurface: colors.text,
+      surfaceContainerHighest: colors.background,
+      onSurfaceVariant: colors.weak,
+      outline: colors.weak,
+      outlineVariant: colors.weak.withValues(alpha: 0.55),
+    );
+    return base.copyWith(
+      brightness: brightness,
+      colorScheme: colorScheme,
+      scaffoldBackgroundColor: colors.background,
+      textTheme: base.textTheme.apply(
+        bodyColor: colors.text,
+        displayColor: colors.text,
+      ),
+      iconTheme: base.iconTheme.copyWith(color: colors.text),
+      popupMenuTheme: base.popupMenuTheme.copyWith(
+        color: colors.background,
+        textStyle: TextStyle(color: colors.text),
+      ),
+      bottomSheetTheme: base.bottomSheetTheme.copyWith(
+        backgroundColor: colors.background,
+      ),
+      textSelectionTheme: base.textSelectionTheme.copyWith(
+        cursorColor: colors.accent,
+        selectionColor: colors.accent.withValues(alpha: 0.25),
+        selectionHandleColor: colors.accent,
       ),
     );
   }
@@ -1887,9 +2227,9 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     ReaderThemeColors colors,
   ) {
     if (_loading && _pages.isEmpty) {
-      return const Center(
+      return Center(
         child: CircularProgressIndicator(
-          color: CodarColors.gold,
+          color: colors.accent,
           strokeWidth: 2.5,
         ),
       );
@@ -1914,6 +2254,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     }
     final margin = settings.marginPx.toDouble().clamp(8.0, 96.0).toDouble();
     final align = switch (settings.alignment) {
+      'end' => TextAlign.end,
       'center' => TextAlign.center,
       'justify' => TextAlign.justify,
       _ => TextAlign.start,
@@ -1965,34 +2306,30 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
               margin,
               _pageBottomPadding,
             ),
-            child: SelectableRegion(
-              key: i == _pageIndex ? _regionKey : null,
-              focusNode: i == _pageIndex ? _regionFocus : null,
-              selectionControls: MaterialTextSelectionControls(),
-              onSelectionChanged: _onSelectionChanged,
-              child: page.blocks.isEmpty
-                  ? Text(
-                      tr(locale, 'emptySection'),
-                      style: TextStyle(color: colors.weak),
-                    )
-                  : Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        for (var j = 0; j < page.blocks.length; j++)
-                          Padding(
-                            padding: EdgeInsets.only(
-                              bottom: j == page.blocks.length - 1 ? 0 : 12,
-                            ),
-                            child: _blockText(
-                              page.blocks[j],
-                              settings,
-                              colors,
-                              align,
-                            ),
+            child: page.blocks.isEmpty
+                ? Text(
+                    tr(locale, 'emptySection'),
+                    style: TextStyle(color: colors.weak),
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      for (var j = 0; j < page.blocks.length; j++)
+                        Padding(
+                          padding: EdgeInsets.only(
+                            bottom: j == page.blocks.length - 1 ? 0 : 12,
                           ),
-                      ],
-                    ),
-            ),
+                          child: _blockText(
+                            page.blocks[j],
+                            settings,
+                            colors,
+                            align,
+                            sectionIndex: _section,
+                            selectionKey: '$_section:$i:$j',
+                          ),
+                        ),
+                    ],
+                  ),
           ),
         );
       },
@@ -2014,8 +2351,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         height: _readerPageExtent,
         child: Center(
           child: error == null
-              ? const CircularProgressIndicator(
-                  color: CodarColors.gold,
+              ? CircularProgressIndicator(
+                  color: colors.accent,
                   strokeWidth: 2.5,
                 )
               : Column(
@@ -2042,8 +2379,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         child: Center(
           child: error == null
               ? (_loadingContinuousSections.contains(entry.section.index)
-                    ? const CircularProgressIndicator(
-                        color: CodarColors.gold,
+                    ? CircularProgressIndicator(
+                        color: colors.accent,
                         strokeWidth: 2.5,
                       )
                     : const SizedBox.shrink())
@@ -2087,6 +2424,9 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
               settings,
               colors,
               align,
+              sectionIndex: entry.section.index,
+              selectionKey:
+                  '${entry.section.index}:${entry.sectionPageIndex}:$j',
               highlights: section.highlights,
               engineChars: section.engineChars,
             ),
@@ -2099,7 +2439,9 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       ),
       label: _isPdf
           ? '${tr(locale, 'pageOf')} ${entry.section.index + 1} / $_sectionCount'
-          : '${tr(locale, 'pageOf')} ${index + 1} / ${_continuousPages.length}',
+          : '${tr(locale, 'pageOf')} '
+                '${_displayContinuousPageIndex(index) + 1} / '
+                '$_displayContinuousPageCount',
       child: SizedBox(
         height: _readerPageExtent,
         child: Padding(
@@ -2109,18 +2451,12 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
             margin,
             _pageBottomPadding,
           ),
-          child: SelectableRegion(
-            key: index == _continuousIndex ? _regionKey : null,
-            focusNode: index == _continuousIndex ? _regionFocus : null,
-            selectionControls: MaterialTextSelectionControls(),
-            onSelectionChanged: _onSelectionChanged,
-            child: contentBlocks.isEmpty
-                ? Text(
-                    tr(locale, 'emptySection'),
-                    style: TextStyle(color: colors.weak),
-                  )
-                : contentColumn,
-          ),
+          child: contentBlocks.isEmpty
+              ? Text(
+                  tr(locale, 'emptySection'),
+                  style: TextStyle(color: colors.weak),
+                )
+              : contentColumn,
         ),
       ),
     );
@@ -2131,13 +2467,19 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     ReaderSettingsData settings,
     ReaderThemeColors colors,
     TextAlign align, {
+    required int sectionIndex,
+    required Object selectionKey,
     List<HighlightRecord>? highlights,
     int? engineChars,
   }) {
     if (block is ImageBlock) return _readerImageBlock(block);
     if (block is! TextBlock) return const SizedBox.shrink();
     final textBlock = block;
-    final base = _styleForBlock(textBlock, settings, colors.text);
+    final base = _styleForBlock(
+      textBlock,
+      settings,
+      textBlock.isHeading ? colors.accent : colors.text,
+    );
     final spans = _spansFor(
       textBlock,
       base,
@@ -2145,15 +2487,16 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       engineChars: engineChars,
     );
     final style = base;
-    final prefix = textBlock.kind == 'li' ? '• ' : '';
-    return Text.rich(
+    final text = Text.rich(
       TextSpan(
         children: [
-          if (prefix.isNotEmpty) TextSpan(text: prefix, style: style),
           ...spans.map(
             (s) => TextSpan(
               text: s.text,
               style: style.copyWith(
+                color: s.background == null
+                    ? colors.text
+                    : _highlightForeground(s.background!),
                 fontWeight: s.bold ? FontWeight.bold : null,
                 fontStyle: s.italic ? FontStyle.italic : null,
                 backgroundColor: s.background,
@@ -2163,6 +2506,23 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         ],
       ),
       textAlign: align,
+    );
+    final selectable = _ReaderSelectableBlock(
+      key: ValueKey('select-$selectionKey'),
+      blockKey: selectionKey,
+      sectionIndex: sectionIndex,
+      block: textBlock,
+      onRangeChanged: _onBlockSelectionChanged,
+      child: text,
+    );
+    if (textBlock.kind != 'li') return selectable;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('•', style: style),
+        const SizedBox(width: 8),
+        Expanded(child: selectable),
+      ],
     );
   }
 
@@ -2236,30 +2596,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     TextBlock block,
     ReaderSettingsData settings,
     Color color,
-  ) {
-    final fontSize = settings.fontSizePx
-        .toDouble()
-        .clamp(12.0, 40.0)
-        .toDouble();
-    final height = settings.lineHeight.clamp(1.0, 2.5).toDouble();
-    final base = TextStyle(
-      fontSize: fontSize,
-      height: height,
-      color: color,
-      fontFamily: _fontFamily(settings.fontFamily),
-    );
-    if (!block.isHeading) return base;
-    return base.copyWith(
-      fontWeight: FontWeight.bold,
-      fontSize:
-          base.fontSize! *
-          (block.kind == 'h1'
-              ? 1.5
-              : block.kind == 'h2'
-              ? 1.35
-              : 1.2),
-    );
-  }
+  ) => ReaderPagination.styleForBlock(block, settings, color);
 
   List<_PaintSpan> _spansFor(
     TextBlock block,
@@ -2268,41 +2605,41 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     int? engineChars,
   }) {
     final activeHighlights = highlights ?? _highlights;
-    final activeEngineChars = engineChars ?? _engineChars;
     final text = block.plainText;
     if (text.isEmpty || activeHighlights.isEmpty) {
       return [
         for (final p in block.parts) _PaintSpan(p.text, p.bold, p.italic, null),
       ];
     }
-    // Overlay highlight ranges located by quoted text (nearest relative pos).
-    final ranges = <_Range>[];
-    for (final h in activeHighlights) {
-      if (h.quotedText.isEmpty) continue;
-      var from = 0;
-      final occs = <int>[];
-      while (true) {
-        final idx = text.indexOf(h.quotedText, from);
-        if (idx < 0) break;
-        occs.add(idx);
-        from = idx + 1;
-      }
-      if (occs.isEmpty) continue;
-      final rel = activeEngineChars <= 0
-          ? 0.0
-          : (h.startOffset / activeEngineChars).clamp(0.0, 1.0);
-      var best = occs.first;
-      var bestD = 1e18;
-      for (final o in occs) {
-        final d = ((o / text.length) - rel).abs();
-        if (d < bestD) {
-          bestD = d;
-          best = o;
+    if (block.sourceStartOffsets.length != text.length ||
+        block.sourceEndOffsets.length != text.length) {
+      return [
+        for (final p in block.parts) _PaintSpan(p.text, p.bold, p.italic, null),
+      ];
+    }
+    // Paint against the exact Rust scalar ranges carried by each rendered
+    // UTF-16 code unit. Repeated phrases therefore cannot jump to another
+    // occurrence in the same paragraph or section.
+    final colors = List<int?>.filled(text.length, null);
+    for (final highlight in activeHighlights) {
+      for (var i = 0; i < text.length; i++) {
+        if (block.sourceStartOffsets[i] < highlight.endOffset &&
+            block.sourceEndOffsets[i] > highlight.startOffset) {
+          colors[i] = highlight.color;
         }
       }
-      ranges.add(_Range(best, best + h.quotedText.length, h.color));
     }
-    ranges.sort((a, b) => a.start.compareTo(b.start));
+    final ranges = <_Range>[];
+    var runStart = 0;
+    while (runStart < colors.length) {
+      final color = colors[runStart];
+      var runEnd = runStart + 1;
+      while (runEnd < colors.length && colors[runEnd] == color) {
+        runEnd++;
+      }
+      if (color != null) ranges.add(_Range(runStart, runEnd, color));
+      runStart = runEnd;
+    }
     // Rebuild spans: walk original parts, splitting at range boundaries.
     final out = <_PaintSpan>[];
     var cursor = 0;
@@ -2354,14 +2691,6 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         );
       }
     }
-  }
-
-  static String? _fontFamily(String name) {
-    return switch (name) {
-      'Serif' => 'serif',
-      'Monospace' => 'monospace',
-      _ => null,
-    };
   }
 
   static String _displayError(String raw, String locale) {
@@ -2587,9 +2916,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                                   value: progress,
                                   minHeight: 2,
                                   color: colors.text,
-                                  backgroundColor: colors.weak.withValues(
-                                    alpha: 0.22,
-                                  ),
+                                  backgroundColor: colors.progressTrack,
                                 ),
                               ),
                               const SizedBox(height: 6),
@@ -2636,82 +2963,162 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
 
   Widget _highlightBar(String locale, ReaderThemeColors colors) {
     final pending = _pending;
-    return Container(
-      color: colors.background,
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-      child: SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (pending != null)
-              Text(
-                pending.text.length > 80
-                    ? '${pending.text.substring(0, 80)}…'
-                    : pending.text,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(color: colors.weak, fontSize: 12),
-              ),
-            Row(
-              children: [
-                SegmentedButton<String>(
-                  segments: [
-                    ButtonSegment(
-                      value: 'word',
-                      label: Text(tr(locale, 'word')),
-                    ),
-                    ButtonSegment(
-                      value: 'sentence',
-                      label: Text(tr(locale, 'sentence')),
-                    ),
-                    ButtonSegment(
-                      value: 'paragraph',
-                      label: Text(tr(locale, 'paragraph')),
-                    ),
-                  ],
-                  selected: {_granularity},
-                  onSelectionChanged: (s) {
-                    final mode = s.first;
-                    setState(() => _granularity = mode);
-                    if (pending != null && mode != 'paragraph') {
-                      setState(() => _pending = _expand(pending, mode));
-                    }
-                  },
+    final uniform = _uniformSelectedColor();
+    return Material(
+      color: Colors.transparent,
+      child: Card(
+        color: colors.background,
+        elevation: 8,
+        margin: EdgeInsets.zero,
+        shape: RoundedRectangleBorder(
+          side: BorderSide(color: colors.weak.withValues(alpha: 0.6)),
+          borderRadius: BorderRadius.circular(18),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (pending != null)
+                Text(
+                  pending.text.length > 110
+                      ? '${pending.text.substring(0, 110)}…'
+                      : pending.text,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: colors.weak, fontSize: 12),
                 ),
-              ],
-            ),
-            Row(
-              children: [
-                for (final c in highlightPalette)
-                  GestureDetector(
-                    onTap: () => setState(() => _pendingColor = c),
-                    child: Container(
-                      width: 32,
-                      height: 32,
-                      margin: const EdgeInsets.only(right: 8),
-                      decoration: BoxDecoration(
-                        color: Color(c),
-                        shape: BoxShape.circle,
-                        border: _pendingColor == c
-                            ? Border.all(color: colors.text, width: 2)
-                            : null,
+              const SizedBox(height: 10),
+              Wrap(
+                alignment: WrapAlignment.center,
+                spacing: 8,
+                runSpacing: 10,
+                children: [
+                  Semantics(
+                    label: tr(locale, 'clearHighlight'),
+                    button: true,
+                    child: InkResponse(
+                      radius: 28,
+                      onTap: _saving
+                          ? null
+                          : () => _applySelectionColor(0, clear: true),
+                      child: Container(
+                        width: 36,
+                        height: 36,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: colors.background,
+                          border: Border.all(
+                            color: _selectionIntersectsHighlight()
+                                ? colors.accent
+                                : colors.weak,
+                            width: _selectionIntersectsHighlight() ? 2.5 : 1,
+                          ),
+                        ),
+                        child: Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            Icon(
+                              Icons.format_color_reset_rounded,
+                              color: colors.text,
+                              size: 21,
+                            ),
+                            CustomPaint(
+                              size: const Size(20, 20),
+                              painter: _SelectionStrikePainter(colors.text),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
-                const Spacer(),
-                TextButton(
-                  onPressed: _saving ? null : _cancelPending,
-                  child: Text(tr(locale, 'cancel')),
-                ),
-                FilledButton(
-                  onPressed: _saving ? null : _saveHighlight,
-                  child: Text(tr(locale, 'highlight')),
-                ),
-              ],
-            ),
-          ],
+                  for (final color in highlightPalette)
+                    Semantics(
+                      label: tr(locale, 'highlightColor'),
+                      button: true,
+                      child: InkResponse(
+                        radius: 28,
+                        onTap: _saving
+                            ? null
+                            : () => _applySelectionColor(color),
+                        child: Container(
+                          width: 36,
+                          height: 36,
+                          decoration: BoxDecoration(
+                            color: Color(color),
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: uniform == color
+                                  ? colors.text
+                                  : colors.weak,
+                              width: uniform == color ? 2.5 : 1,
+                            ),
+                          ),
+                          child: uniform == color
+                              ? CustomPaint(
+                                  size: const Size(22, 22),
+                                  painter: _SelectionStrikePainter(
+                                    _highlightForeground(Color(color)),
+                                  ),
+                                )
+                              : null,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  TextButton(
+                    onPressed: _saving ? null : _cancelPending,
+                    child: Text(tr(locale, 'cancel')),
+                  ),
+                  const Spacer(),
+                  FilledButton.icon(
+                    icon: const Icon(Icons.format_quote_rounded),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: colors.accent,
+                      foregroundColor: colors.onAccent,
+                    ),
+                    onPressed: _saving ? null : _saveQuote,
+                    label: Text(tr(locale, 'quote')),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
+    );
+  }
+
+  Widget _positionedHighlightPanel(String locale, ReaderThemeColors colors) {
+    final size = MediaQuery.sizeOf(context);
+    final safe = MediaQuery.paddingOf(context);
+    final width = math.min(380.0, size.width - 24).toDouble();
+    const panelHeight = 190.0;
+    final anchor =
+        _selectionAnchor ?? Offset(size.width / 2, size.height * .55);
+    final minTop = safe.top + 88;
+    final maxTop = math.max(
+      minTop,
+      size.height - safe.bottom - panelHeight - 12,
+    );
+    final above = anchor.dy - panelHeight - 16;
+    final below = anchor.dy + 18;
+    final top = (above >= minTop ? above : below)
+        .clamp(minTop, maxTop)
+        .toDouble();
+    final left = (anchor.dx - width / 2)
+        .clamp(12.0, size.width - width - 12)
+        .toDouble();
+    return Positioned(
+      left: left,
+      top: top,
+      width: width,
+      child: _highlightBar(locale, colors),
     );
   }
 }
@@ -2724,6 +3131,8 @@ extension _ReaderSettingsCopy on ReaderSettingsData {
     int? marginPx,
     String? alignment,
     String? theme,
+    double? brightness,
+    bool clearBrightness = false,
   }) => ReaderSettingsData(
     fontFamily: fontFamily ?? this.fontFamily,
     fontSizePx: fontSizePx ?? this.fontSizePx,
@@ -2731,7 +3140,76 @@ extension _ReaderSettingsCopy on ReaderSettingsData {
     marginPx: marginPx ?? this.marginPx,
     alignment: alignment ?? this.alignment,
     theme: theme ?? this.theme,
+    brightness: clearBrightness ? null : brightness ?? this.brightness,
   );
+}
+
+class _ReaderAlignmentRow extends StatelessWidget {
+  const _ReaderAlignmentRow({
+    required this.locale,
+    required this.alignment,
+    required this.onChanged,
+  });
+
+  final String locale;
+  final String alignment;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 8),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(tr(locale, 'alignment')),
+        const SizedBox(height: 6),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: SegmentedButton<String>(
+            showSelectedIcon: false,
+            segments: [
+              ButtonSegment(
+                value: 'start',
+                label: Text(tr(locale, 'alignStart')),
+              ),
+              ButtonSegment(value: 'end', label: Text(tr(locale, 'alignEnd'))),
+              ButtonSegment(
+                value: 'center',
+                label: Text(tr(locale, 'alignCenter')),
+              ),
+              ButtonSegment(
+                value: 'justify',
+                label: Text(tr(locale, 'alignJustify')),
+              ),
+            ],
+            selected: {alignment},
+            onSelectionChanged: (value) => onChanged(value.first),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _SelectionStrikePainter extends CustomPainter {
+  const _SelectionStrikePainter(this.color);
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawLine(
+      Offset(size.width * .12, size.height * .88),
+      Offset(size.width * .88, size.height * .12),
+      Paint()
+        ..color = color
+        ..strokeWidth = 2.2
+        ..strokeCap = StrokeCap.round,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_SelectionStrikePainter oldDelegate) =>
+      oldDelegate.color != color;
 }
 
 class _ReaderSliderRow extends StatelessWidget {
@@ -2776,16 +3254,110 @@ class _ReaderSliderRow extends StatelessWidget {
   }
 }
 
-class _RawReaderPage {
-  _RawReaderPage(this.blocks, this.start);
-  final List<ReaderBlock> blocks;
-  final int start;
+typedef _ReaderPage = ReaderPage;
+
+class _ReaderSelectionControls extends MaterialTextSelectionControls
+    with TextSelectionHandleControls {}
+
+class _ReaderSelectableBlock extends StatefulWidget {
+  const _ReaderSelectableBlock({
+    super.key,
+    required this.blockKey,
+    required this.sectionIndex,
+    required this.block,
+    required this.onRangeChanged,
+    required this.child,
+  });
+
+  final Object blockKey;
+  final int sectionIndex;
+  final TextBlock block;
+  final void Function(
+    Object blockKey,
+    int sectionIndex,
+    TextBlock block,
+    SelectedContentRange? range,
+  )
+  onRangeChanged;
+  final Widget child;
+
+  @override
+  State<_ReaderSelectableBlock> createState() => _ReaderSelectableBlockState();
 }
 
-class _ReaderPage {
-  const _ReaderPage({required this.blocks, required this.startOffset});
-  final List<ReaderBlock> blocks;
-  final int startOffset;
+class _ReaderSelectableBlockState extends State<_ReaderSelectableBlock> {
+  final SelectionListenerNotifier _notifier = SelectionListenerNotifier();
+
+  @override
+  void initState() {
+    super.initState();
+    _notifier.addListener(_selectionChanged);
+  }
+
+  void _selectionChanged() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_notifier.registered) return;
+      widget.onRangeChanged(
+        widget.blockKey,
+        widget.sectionIndex,
+        widget.block,
+        _notifier.selection.range,
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    _notifier.removeListener(_selectionChanged);
+    _notifier.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      SelectionListener(selectionNotifier: _notifier, child: widget.child);
+}
+
+class _SelectionStatusObserver extends StatefulWidget {
+  const _SelectionStatusObserver({
+    required this.onChanged,
+    required this.child,
+  });
+  final ValueChanged<SelectableRegionSelectionStatus> onChanged;
+  final Widget child;
+
+  @override
+  State<_SelectionStatusObserver> createState() =>
+      _SelectionStatusObserverState();
+}
+
+class _SelectionStatusObserverState extends State<_SelectionStatusObserver> {
+  ValueListenable<SelectableRegionSelectionStatus>? _status;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final next = SelectableRegionSelectionStatusScope.maybeOf(context);
+    if (next == _status) return;
+    _status?.removeListener(_statusChanged);
+    _status = next;
+    _status?.addListener(_statusChanged);
+    _statusChanged();
+  }
+
+  void _statusChanged() {
+    final status = _status;
+    if (mounted && status != null) widget.onChanged(status.value);
+  }
+
+  @override
+  void dispose() {
+    _status?.removeListener(_statusChanged);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }
 
 class _ReaderSection {
@@ -2795,7 +3367,6 @@ class _ReaderSection {
     required this.pages,
     required this.enginePlain,
     required this.engineChars,
-    required this.normalized,
     required this.highlights,
     this.isPlaceholder = false,
   });
@@ -2805,7 +3376,6 @@ class _ReaderSection {
   final List<_ReaderPage> pages;
   final String enginePlain;
   final int engineChars;
-  final _Normalized normalized;
   final List<HighlightRecord> highlights;
   final bool isPlaceholder;
 
@@ -2816,7 +3386,6 @@ class _ReaderSection {
         pages: pages,
         enginePlain: enginePlain,
         engineChars: engineChars,
-        normalized: normalized,
         highlights: value,
         isPlaceholder: isPlaceholder,
       );
@@ -2832,12 +3401,6 @@ class _ContinuousPage {
   final _ReaderSection section;
   final _ReaderPage page;
   final int sectionPageIndex;
-}
-
-class _Normalized {
-  _Normalized(this.text, this.map);
-  final String text;
-  final List<int> map;
 }
 
 class _PaintSpan {

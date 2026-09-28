@@ -21,14 +21,31 @@ sealed class ReaderBlock {
 }
 
 class TextBlock extends ReaderBlock {
-  TextBlock({required this.kind, required this.parts});
+  TextBlock({
+    required this.kind,
+    required this.parts,
+    this.sourceStartOffsets = const [],
+    this.sourceEndOffsets = const [],
+  });
 
   /// 'h1'..'h6', 'p', 'li', 'quote'
   final String kind;
   final List<SpanPart> parts;
 
+  /// Rust scalar offsets for each UTF-16 code unit in [plainText]. Both code
+  /// units of a surrogate pair point to the same scalar range.
+  final List<int> sourceStartOffsets;
+  final List<int> sourceEndOffsets;
+
   @override
   String get plainText => parts.map((p) => p.text).join();
+
+  TextBlock withSourceOffsets(List<int> starts, List<int> ends) => TextBlock(
+    kind: kind,
+    parts: parts,
+    sourceStartOffsets: starts,
+    sourceEndOffsets: ends,
+  );
   bool get isHeading => kind.startsWith('h');
   bool get isEmpty => plainText.trim().isEmpty;
 }
@@ -315,6 +332,9 @@ String _decodeEntities(String s) {
   // Output is plain text (never re-parsed as HTML), so this is safe.
   return _decodeOnce(_decodeOnce(s));
 }
+
+/// Applies the reader's existing HTML entity decoding rules to annotation text.
+String decodeReaderEntities(String text) => _decodeEntities(text);
 
 String _decodeOnce(String s) {
   var out = s

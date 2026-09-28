@@ -3,7 +3,7 @@ description: "Local-first Flutter and Rust ebook reader for Codar."
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 
 # Android versionName/versionCode and iOS build name/number come from this value.
-version: 1.5.2+40
+version: 1.6.0+44
 
 environment:
   sdk: ^3.13.1
@@ -68,3 +68,17 @@ flutter:
     - assets/brand/codar_app_icon_premium_1024.png
     - assets/brand/codar_app_icon_symbol_1024.png
     - assets/brand/codar_home_hero_background.png
+    - assets/fonts/OFL-Literata.txt
+    - assets/fonts/OFL-Lora.txt
+    - assets/fonts/OFL-AtkinsonHyperlegible.txt
+
+  fonts:
+    - family: Literata
+      fonts:
+        - asset: assets/fonts/Literata.ttf
+    - family: Lora
+      fonts:
+        - asset: assets/fonts/Lora.ttf
+    - family: AtkinsonHyperlegible
+      fonts:
+        - asset: assets/fonts/AtkinsonHyperlegible-Regular.ttf

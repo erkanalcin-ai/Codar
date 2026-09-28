@@ -4,11 +4,15 @@
 import 'package:codar/src/app/providers.dart';
 import 'package:codar/src/brand/codar_brand.dart';
 import 'package:codar/src/db/models.dart';
+import 'package:codar/src/db/repositories.dart';
 import 'package:codar/src/l10n/strings.dart';
 import 'package:codar/src/library/book_actions.dart';
 import 'package:codar/src/library/enrichment_service.dart';
+import 'package:codar/src/library/import_service.dart';
 import 'package:codar/src/presentation/widgets/book_widgets.dart';
 import 'package:codar/src/reader/locator_nav.dart';
+import 'package:codar/src/reader/reader_pagination.dart';
+import 'package:codar/src/reader/reader_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -411,16 +415,7 @@ class _TitleBlock extends ConsumerWidget {
               ?.copyWith(color: CodarColors.creamDark),
         ),
         const SizedBox(height: 8),
-        _MetaRow(label: tr(locale, 'format'), value: book.format.toUpperCase()),
-        _MetaRow(
-          label: tr(locale, 'language'),
-          value: book.language.isEmpty ? '—' : book.language,
-        ),
-        _MetaRow(label: tr(locale, 'sections'), value: '${book.sectionCount}'),
-        _MetaRow(
-          label: tr(locale, 'added'),
-          value: formatDate(book.addedAt, locale),
-        ),
+        _ActualPageCount(book: book, locale: locale),
         FutureBuilder<Map<String, String>>(
           future: ref.watch(booksRepoProvider).getMetadata(bookId),
           builder: (c, msnap) {
@@ -428,23 +423,28 @@ class _TitleBlock extends ConsumerWidget {
             final pub = meta['publisher'] ?? '';
             final date = meta['published'] ?? '';
             final isbn = meta['isbn'] ?? '';
-            final pages = pageCountLabel(meta['number_of_pages'], locale);
-            if (pub.isEmpty && date.isEmpty && isbn.isEmpty && pages == null) {
-              return const SizedBox.shrink();
-            }
             return Column(
               children: [
+                _MetaRow(
+                  label: tr(locale, 'published'),
+                  value: date.isEmpty ? '—' : date,
+                ),
                 if (pub.isNotEmpty)
                   _MetaRow(label: tr(locale, 'publisher'), value: pub),
-                if (date.isNotEmpty)
-                  _MetaRow(label: tr(locale, 'published'), value: date),
                 if (isbn.isNotEmpty)
                   _MetaRow(label: tr(locale, 'isbn'), value: isbn),
-                if (pages != null)
-                  _MetaRow(label: tr(locale, 'pages'), value: pages),
               ],
             );
           },
+        ),
+        _MetaRow(
+          label: tr(locale, 'language'),
+          value: book.language.isEmpty ? '—' : book.language,
+        ),
+        _MetaRow(label: tr(locale, 'format'), value: book.format.toUpperCase()),
+        _MetaRow(
+          label: tr(locale, 'addedDate'),
+          value: formatDate(book.addedAt, locale),
         ),
         FutureBuilder<ProgressRecord?>(
           future: ref.watch(progressRepoProvider).loadProgress(bookId),
@@ -651,6 +651,92 @@ class _RecordGroup extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+class _ActualPageCount extends ConsumerStatefulWidget {
+  const _ActualPageCount({required this.book, required this.locale});
+
+  final BookRecord book;
+  final String locale;
+
+  @override
+  ConsumerState<_ActualPageCount> createState() => _ActualPageCountState();
+}
+
+class _ActualPageCountState extends ConsumerState<_ActualPageCount> {
+  Object? _requestKey;
+  Future<int?>? _pageCount;
+
+  @override
+  Widget build(BuildContext context) {
+    final settings = ref.watch(readerSettingsProvider);
+    final viewport = MediaQuery.sizeOf(context);
+    final requestKey = (
+      widget.book.bookId,
+      widget.book.format,
+      settings.fontFamily,
+      settings.fontSizePx,
+      settings.lineHeight,
+      settings.marginPx,
+      settings.alignment,
+      viewport.width,
+      viewport.height,
+    );
+    if (_requestKey != requestKey) {
+      _requestKey = requestKey;
+      _pageCount = _loadPageCount(
+        book: widget.book,
+        settings: settings,
+        viewport: viewport,
+        books: ref.read(booksRepoProvider),
+        imports: ref.read(importServiceProvider),
+        reader: ref.read(readerServiceProvider),
+      );
+    }
+
+    return FutureBuilder<int?>(
+      future: _pageCount,
+      builder: (context, snapshot) {
+        final count = snapshot.data;
+        final value = snapshot.connectionState == ConnectionState.waiting
+            ? '…'
+            : count == null
+            ? '—'
+            : '$count';
+        return _MetaRow(label: tr(widget.locale, 'pages'), value: value);
+      },
+    );
+  }
+
+  Future<int?> _loadPageCount({
+    required BookRecord book,
+    required ReaderSettingsData settings,
+    required Size viewport,
+    required BooksRepository books,
+    required ImportService imports,
+    required CodarReaderService reader,
+  }) async {
+    try {
+      final file = await books.getFile(book.bookId, 'original');
+      if (file == null) return null;
+      final name = file.displayName.isEmpty ? book.format : file.displayName;
+      final dot = name.lastIndexOf('.');
+      final extension = dot >= 0 && dot < name.length - 1
+          ? name.substring(dot + 1).toLowerCase()
+          : book.format.toLowerCase();
+      final path = await imports.stagedPathForReading(book.bookId, extension);
+      if (path == null) return null;
+      final count = await countReaderTotalPageCount(
+        reader: reader,
+        path: path,
+        settings: settings,
+        viewport: viewport,
+      );
+      return count > 0 ? count : null;
+    } catch (_) {
+      return null;
+    }
   }
 }
 

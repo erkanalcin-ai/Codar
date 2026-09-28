@@ -2,12 +2,16 @@ package com.codar.codar
 
 import android.content.ContentUris
 import android.content.ContentValues
+import android.content.Intent
+import android.database.Cursor
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.view.View
 import android.view.WindowInsetsController
 import java.io.File
@@ -32,6 +36,19 @@ import io.flutter.plugin.common.MethodChannel
  */
 class MainActivity : FlutterActivity() {
     private val channelName = "codar/storage"
+    private var openWithChannel: MethodChannel? = null
+    private val pendingOpenWithFiles = mutableListOf<Map<String, Any>>()
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        enqueueOpenWithFile(intent, notifyFlutter = false)
+        super.onCreate(savedInstanceState)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        enqueueOpenWithFile(intent, notifyFlutter = true)
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -68,15 +85,31 @@ class MainActivity : FlutterActivity() {
                             val size = call.argument<Number>("size")?.toLong() ?: -1L
                             result.success(copyFileToPath(uri, path, size))
                         }
+                        "copyExternalToPath" -> {
+                            val uri = Uri.parse(call.argument<String>("uri")!!)
+                            val path = call.argument<String>("path")!!
+                            val maxBytes = call.argument<Number>("maxBytes")?.toLong()
+                                ?: throw IllegalArgumentException("Missing external file size limit")
+                            result.success(copyExternalToPath(uri, path, maxBytes))
+                        }
                         "listTreeFiles" -> {
                             val treeUri = call.argument<String>("treeUri")!!
                             result.success(listTreeFiles(treeUri))
+                        }
+                        "isCodarLibRoot" -> {
+                            val location = call.argument<String>("location")!!
+                            result.success(isCodarLibRoot(location))
                         }
                         "listCodarLib" -> result.success(listCodarLib())
                         "setSystemUi" -> {
                             val lightStatusBar =
                                 call.argument<Boolean>("lightStatusBar") ?: false
                             setSystemUi(lightStatusBar)
+                            result.success(null)
+                        }
+                        "setReaderBrightness" -> {
+                            val brightness = call.argument<Number>("brightness")?.toFloat() ?: -1f
+                            setReaderBrightness(brightness)
                             result.success(null)
                         }
                         "deleteFile" -> {
@@ -89,6 +122,20 @@ class MainActivity : FlutterActivity() {
                     result.error("STORAGE_ERROR", e.message, null)
                 }
             }
+        openWithChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "codar/open_with",
+        ).also { channel ->
+            channel.setMethodCallHandler { call, result ->
+                if (call.method == "takePendingOpenWithFiles") {
+                    val pending = pendingOpenWithFiles.toList()
+                    pendingOpenWithFiles.clear()
+                    result.success(pending)
+                } else {
+                    result.notImplemented()
+                }
+            }
+        }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "codar/app")
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -147,6 +194,65 @@ class MainActivity : FlutterActivity() {
                 WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS,
             )
         }
+    }
+
+    private fun setReaderBrightness(value: Float) {
+        val attributes = window.attributes
+        attributes.screenBrightness = if (value < 0f) -1f else value.coerceIn(0.05f, 1f)
+        window.attributes = attributes
+    }
+
+    private fun enqueueOpenWithFile(intent: Intent?, notifyFlutter: Boolean) {
+        if (intent?.action != Intent.ACTION_VIEW) return
+        val uri = intent.data ?: return
+        val fileInfo = mapOf(
+            "uri" to uri.toString(),
+            "displayName" to queryDisplayName(uri),
+            "mimeType" to (intent.type ?: contentResolver.getType(uri) ?: ""),
+            "size" to querySize(uri),
+        )
+        val channel = if (notifyFlutter) openWithChannel else null
+        if (channel == null) {
+            pendingOpenWithFiles.add(fileInfo)
+        } else {
+            channel.invokeMethod("openWithFile", fileInfo)
+        }
+    }
+
+    private fun queryDisplayName(uri: Uri): String {
+        if (uri.scheme == "file") return File(uri.path ?: "").name
+        var name = ""
+        contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.DISPLAY_NAME),
+            null,
+            null,
+            null,
+        )?.use { cursor: Cursor ->
+            if (cursor.moveToFirst()) {
+                val column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (column >= 0) name = cursor.getString(column) ?: ""
+            }
+        }
+        return name.ifBlank { uri.lastPathSegment ?: "Imported book" }
+    }
+
+    private fun querySize(uri: Uri): Long {
+        if (uri.scheme == "file") return File(uri.path ?: "").length()
+        var size = -1L
+        contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.SIZE),
+            null,
+            null,
+            null,
+        )?.use { cursor: Cursor ->
+            if (cursor.moveToFirst()) {
+                val column = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (column >= 0 && !cursor.isNull(column)) size = cursor.getLong(column)
+            }
+        }
+        return size
     }
 
     /**
@@ -224,7 +330,12 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun copySource(sourceUri: Uri, output: OutputStream, expectedSize: Long) {
+    private fun copySource(
+        sourceUri: Uri,
+        output: OutputStream,
+        expectedSize: Long,
+        maxBytes: Long = Long.MAX_VALUE,
+    ) {
         val input = openSourceInput(sourceUri)
             ?: throw IllegalStateException("Cannot open selected source: $sourceUri")
         var total = 0L
@@ -235,6 +346,9 @@ class MainActivity : FlutterActivity() {
                     while (true) {
                         val read = bufferedInput.read(buffer)
                         if (read < 0) break
+                        if (total + read > maxBytes) {
+                            throw IllegalArgumentException("Selected file exceeds import size limit")
+                        }
                         bufferedOutput.write(buffer, 0, read)
                         total += read
                     }
@@ -350,6 +464,25 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun copyExternalToPath(uri: Uri, path: String, maxBytes: Long): Boolean {
+        require(maxBytes > 0) { "Invalid external file size limit" }
+        val destination = File(path)
+        destination.parentFile?.let { parent ->
+            if (!parent.exists() && !parent.mkdirs()) {
+                throw IllegalStateException("Cannot create staging directory")
+            }
+        }
+        try {
+            FileOutputStream(destination).use { output ->
+                copySource(uri, output, -1L, maxBytes)
+            }
+            return true
+        } catch (t: Throwable) {
+            destination.delete()
+            throw t
+        }
+    }
+
     /**
      * Enumerates a user-granted SAF tree without converting it to a raw path.
      * The returned child URIs are read-only import sources; Flutter copies
@@ -369,6 +502,67 @@ class MainActivity : FlutterActivity() {
         )
         return out
     }
+
+    /**
+     * Matches the complete SAF tree identity against the app's actual storage
+     * destination. A matching last path segment or display name is insufficient.
+     */
+    private fun isCodarLibRoot(location: String): Boolean {
+        val uri = Uri.parse(location)
+        if (uri.scheme == "content") {
+            if (uri.authority != "com.android.externalstorage.documents") return false
+            val selectedDocumentId = try {
+                DocumentsContract.getTreeDocumentId(uri).trimEnd('/')
+            } catch (_: IllegalArgumentException) {
+                return false
+            }
+            return selectedDocumentId == codarLibTreeDocumentId()
+        }
+
+        val selectedPath = when (uri.scheme) {
+            "file" -> uri.path ?: return false
+            null, "" -> location
+            else -> return false
+        }
+        return try {
+            File(selectedPath).canonicalPath == codarLibRootDirectory().canonicalPath
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun codarLibTreeDocumentId(): String? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return "primary:${downloadsRelativePath.trimEnd('/')}"
+        }
+        val externalRoot = try {
+            Environment.getExternalStorageDirectory().canonicalPath
+        } catch (_: Exception) {
+            return null
+        }
+        val libraryPath = try {
+            legacyLibraryDir().canonicalPath
+        } catch (_: Exception) {
+            return null
+        }
+        val prefix = externalRoot.trimEnd(File.separatorChar) + File.separator
+        if (!libraryPath.startsWith(prefix)) return null
+        val relativePath = libraryPath.substring(prefix.length)
+            .replace(File.separatorChar, '/')
+        if (relativePath.isEmpty() || relativePath == ".." || relativePath.startsWith("../")) {
+            return null
+        }
+        return "primary:$relativePath"
+    }
+
+    @Suppress("DEPRECATION")
+    private fun codarLibRootDirectory(): File =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            File(Environment.getExternalStorageDirectory(), downloadsRelativePath.trimEnd('/'))
+        } else {
+            legacyLibraryDir()
+        }
 
     private fun enumerateTree(
         treeUri: Uri,

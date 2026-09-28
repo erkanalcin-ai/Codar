@@ -386,6 +386,7 @@ class AnnotationsRepository {
       'section_index': h.sectionIndex,
       'start_offset': h.startOffset,
       'end_offset': h.endOffset,
+      'offset_unit': 'rust_scalar',
       'cfi': h.cfi,
       'color': h.color,
       'quoted_text': h.quotedText,
@@ -408,6 +409,39 @@ class AnnotationsRepository {
     await _db.db.update(
       'highlights',
       {'color': color, 'updated_at': _now()},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  Future<void> updateHighlightRange(int id, HighlightRecord highlight) async {
+    await _db.db.update(
+      'highlights',
+      {
+        'start_offset': highlight.startOffset,
+        'end_offset': highlight.endOffset,
+        'offset_unit': 'rust_scalar',
+        'cfi': highlight.cfi,
+        'quoted_text': highlight.quotedText,
+        'updated_at': _now(),
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  Future<void> updateHighlightOffsetsAsRustScalars(
+    int id,
+    int startOffset,
+    int endOffset,
+  ) async {
+    await _db.db.update(
+      'highlights',
+      {
+        'start_offset': startOffset,
+        'end_offset': endOffset,
+        'offset_unit': 'rust_scalar',
+      },
       where: 'id = ?',
       whereArgs: [id],
     );
@@ -500,6 +534,34 @@ class AnnotationsRepository {
       orderBy: 'created_at DESC',
     );
     return rows.map(BookmarkRecord.fromMap).toList();
+  }
+
+  Future<int> addQuote(QuoteRecord quote) async => _db.db.insert('quotes', {
+    'book_id': quote.bookId,
+    'section_index': quote.sectionIndex,
+    'char_offset': quote.charOffset,
+    'cfi': quote.cfi,
+    'quoted_text': quote.quotedText,
+    'created_at': _now(),
+  });
+
+  Future<void> deleteQuote(int id) async {
+    await _db.db.delete('quotes', where: 'id = ?', whereArgs: [id]);
+  }
+
+  Future<List<QuoteRecord>> allQuotes(String bookId) async {
+    final rows = await _db.db.query(
+      'quotes',
+      where: 'book_id = ?',
+      whereArgs: [bookId],
+      orderBy: 'created_at DESC',
+    );
+    return rows.map(QuoteRecord.fromMap).toList();
+  }
+
+  Future<int> quoteCount() async {
+    final rows = await _db.db.rawQuery('SELECT COUNT(*) AS count FROM quotes');
+    return (rows.first['count'] as int?) ?? 0;
   }
 }
 

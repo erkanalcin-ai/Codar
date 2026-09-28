@@ -23,6 +23,7 @@ const _tables = [
   'book_metadata',
   'reading_progress',
   'highlights',
+  'quotes',
   'notes',
   'bookmarks',
   'favorites',
@@ -201,6 +202,12 @@ class BackupService {
           'end_offset',
           'quoted_text',
         ],
+      );
+      counts['quotes'] = await _mergeNatural(
+        txn,
+        'quotes',
+        _remapBookIds(t['quotes']!, bookIdMap),
+        ['book_id', 'section_index', 'char_offset', 'quoted_text'],
       );
       counts['notes'] = await _mergeNatural(
         txn,

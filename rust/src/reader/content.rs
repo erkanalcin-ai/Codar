@@ -496,4 +496,46 @@ mod tests {
         assert!(html.contains("<h1>Heading</h1>"));
         assert!(html.contains("<li>item</li>"));
     }
+
+    #[test]
+    fn plain_text_alignment_fixtures_match_the_pinned_ebook_extractor() {
+        let fixtures = [
+            (
+                "<p>Copyright &copy; 2012</p>",
+                "Copyright &copy; 2012",
+            ),
+            (
+                "<p>&nbsp;&#169;&#xA9;</p>",
+                "&nbsp;&#169;&#xA9;",
+            ),
+            (
+                "<p>foo<em>bar</em>baz</p>",
+                "foo bar baz",
+            ),
+            (
+                "<p>one\u{2003}\u{00a0}\t two</p>",
+                "one two",
+            ),
+            (
+                "<p>A<script>hidden</script><style>rules</style>B</p>",
+                "A B",
+            ),
+            (
+                "<p>  leading and trailing  </p><p>next</p>",
+                "leading and trailing next",
+            ),
+            (
+                "<p>A😀 café</p>",
+                "A😀 café",
+            ),
+        ];
+
+        for (html, expected) in fixtures {
+            assert_eq!(
+                ebook_rs::section::extract_plain_text(html),
+                expected,
+                "extractor fixture: {html}"
+            );
+        }
+    }
 }

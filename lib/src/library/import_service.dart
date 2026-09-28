@@ -211,6 +211,8 @@ class ImportService {
     );
     if (selected == null || selected.isEmpty) return null;
 
+    final sourceIsCodarLib =
+        Platform.isAndroid && await storage.isCodarLibRoot(selected);
     final candidates = await _folderCandidates(selected);
     var imported = 0;
     var duplicates = 0;
@@ -236,10 +238,13 @@ class ImportService {
               _extension(candidate.displayName) == 'pdf' &&
                   candidate.sourceUri != null &&
                   candidate.size > 0
-              ? await _importFolderPdf(candidate)
-              : await importBytes(
-                  displayName: candidate.displayName,
-                  bytes: await candidate.readBytes(),
+              ? await _importFolderPdf(
+                  candidate,
+                  sourceIsCodarLib: sourceIsCodarLib,
+                )
+              : await _importFolderCandidate(
+                  candidate,
+                  sourceIsCodarLib: sourceIsCodarLib,
                 );
           results.add(result);
           if (result.isNew) {
@@ -362,7 +367,30 @@ class ImportService {
     }
   }
 
-  Future<ImportResult> _importFolderPdf(_FolderCandidate candidate) async {
+  Future<ImportResult> _importFolderCandidate(
+    _FolderCandidate candidate, {
+    required bool sourceIsCodarLib,
+  }) async {
+    final bytes = await candidate.readBytes();
+    if (sourceIsCodarLib &&
+        candidate.size > 0 &&
+        candidate.size != bytes.length) {
+      throw ImportException('source-changed');
+    }
+    return importBytes(
+      displayName: candidate.displayName,
+      bytes: bytes,
+      sourceUri: sourceIsCodarLib ? candidate.sourceUri : null,
+      sourceSize: sourceIsCodarLib ? bytes.length : null,
+      removeSource: !sourceIsCodarLib,
+      sourceIsCodarLib: sourceIsCodarLib,
+    );
+  }
+
+  Future<ImportResult> _importFolderPdf(
+    _FolderCandidate candidate, {
+    required bool sourceIsCodarLib,
+  }) async {
     final sourceUri = candidate.sourceUri!;
     final localPath = candidate.localPath;
     final validationPath =
@@ -388,6 +416,7 @@ class ImportService {
         validationPath: validationPath,
         sourceSize: candidate.size,
         removeSource: false,
+        sourceIsCodarLib: sourceIsCodarLib,
       );
     } finally {
       if (ownsValidationFile) {
@@ -407,6 +436,7 @@ class ImportService {
     String? validationPath,
     int? sourceSize,
     bool removeSource = true,
+    bool sourceIsCodarLib = false,
   }) async {
     final next = _tail.then(
       (_) => _importBytesInner(
@@ -416,10 +446,71 @@ class ImportService {
         validationPath: validationPath,
         sourceSize: sourceSize,
         removeSource: removeSource,
+        sourceIsCodarLib: sourceIsCodarLib,
       ),
     );
     _tail = next.then((_) {}, onError: (_) {});
     return next;
+  }
+
+  /// Imports a document URI supplied by Android ACTION_VIEW through the same
+  /// engine validation and CodarLib/database path used by the file picker.
+  /// The external source is read-only and is never removed by Codar.
+  Future<ImportResult> importExternalUri({
+    required String displayName,
+    required String sourceUri,
+    required int sourceSize,
+    String mimeType = '',
+  }) async {
+    var name = p.basename(displayName.trim());
+    if (name.isEmpty) name = 'Imported book';
+    if (sourceSize > maxImportBytes) throw ImportException('bad-size');
+    if (!_allowedExtensions.containsKey(_extension(name))) {
+      final normalizedMime = mimeType.split(';').first.trim().toLowerCase();
+      String? inferredExtension;
+      for (final entry in _allowedExtensions.entries) {
+        if (entry.value == normalizedMime) {
+          inferredExtension = entry.key;
+          break;
+        }
+      }
+      if (inferredExtension == null) {
+        throw ImportException('unsupported-type');
+      }
+      name = '$name.$inferredExtension';
+    }
+
+    final tempDir = await getTemporaryDirectory();
+    final validation = File(
+      p.join(
+        tempDir.path,
+        'codar_external_${DateTime.now().microsecondsSinceEpoch}.${_extension(name)}',
+      ),
+    );
+    try {
+      final copied = await storage.copyExternalToPath(
+        uri: sourceUri,
+        path: validation.path,
+        maxBytes: maxImportBytes,
+      );
+      if (!copied) throw ImportException('source-unavailable');
+      final actualSize = await validation.length();
+      if (actualSize <= 0 || actualSize > maxImportBytes) {
+        throw ImportException('bad-size');
+      }
+      return await importBytes(
+        displayName: name,
+        bytes: const [],
+        sourceUri: sourceUri,
+        validationPath: validation.path,
+        sourceSize: actualSize,
+        removeSource: false,
+      );
+    } finally {
+      try {
+        if (await validation.exists()) await validation.delete();
+      } catch (_) {}
+    }
   }
 
   Future<ImportResult> _importBytesInner(
@@ -429,6 +520,7 @@ class ImportService {
     String? validationPath,
     int? sourceSize,
     bool removeSource = true,
+    bool sourceIsCodarLib = false,
   }) async {
     final ext = _extension(displayName);
     final mime = _allowedExtensions[ext];
@@ -438,6 +530,9 @@ class ImportService {
     final fileSize = sourceSize ?? bytes.length;
     if (fileSize <= 0 || fileSize > maxImportBytes) {
       throw ImportException('bad-size');
+    }
+    if (sourceIsCodarLib && (sourceUri == null || sourceUri.isEmpty)) {
+      throw ImportException('source-unavailable');
     }
 
     // Prove the engine can actually open it before accepting.
@@ -489,13 +584,15 @@ class ImportService {
         // A JSON backup can preserve the book and its annotations without a
         // physical file. Reattach that file in place instead of creating a
         // second book or replacing any user data.
-        final uri = await _storeImportedFile(
-          displayName: displayName,
-          bytes: bytes,
-          mime: mime,
-          sourceUri: sourceUri,
-          size: fileSize,
-        );
+        final uri = sourceIsCodarLib
+            ? sourceUri!
+            : await _storeImportedFile(
+                displayName: displayName,
+                bytes: bytes,
+                mime: mime,
+                sourceUri: sourceUri,
+                size: fileSize,
+              );
         try {
           await books.upsertFile(
             bookId: existing.bookId,
@@ -507,11 +604,11 @@ class ImportService {
             size: fileSize,
           );
         } catch (_) {
-          await _discardUnregisteredCopy(uri);
+          if (!sourceIsCodarLib) await _discardUnregisteredCopy(uri);
           rethrow;
         }
         await books.touchOpened(existing.bookId);
-        final sourceRetained = removeSource
+        final sourceRetained = removeSource && !sourceIsCodarLib
             ? await _removeCommittedSource(sourceUri)
             : false;
         return ImportResult(
@@ -531,13 +628,15 @@ class ImportService {
     }
 
     // Keep the selected source until both database rows have committed.
-    final uri = await _storeImportedFile(
-      displayName: displayName,
-      bytes: bytes,
-      mime: mime,
-      sourceUri: sourceUri,
-      size: fileSize,
-    );
+    final uri = sourceIsCodarLib
+        ? sourceUri!
+        : await _storeImportedFile(
+            displayName: displayName,
+            bytes: bytes,
+            mime: mime,
+            sourceUri: sourceUri,
+            size: fileSize,
+          );
 
     try {
       await books.addImportedBook(
@@ -554,10 +653,10 @@ class ImportService {
         mediastoreUri: uri,
       );
     } catch (_) {
-      await _discardUnregisteredCopy(uri);
+      if (!sourceIsCodarLib) await _discardUnregisteredCopy(uri);
       rethrow;
     }
-    final sourceRetained = removeSource
+    final sourceRetained = removeSource && !sourceIsCodarLib
         ? await _removeCommittedSource(sourceUri)
         : false;
 

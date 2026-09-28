@@ -13,9 +13,10 @@ class CodarDatabase {
   final Database db;
 
   static const _name = 'codar.db';
-  // Version 1 is the original 13-table baseline. Version 2 keeps that
-  // baseline intact while establishing the explicit migration pipeline.
-  static const version = 2;
+  // Version 1 is the original 13-table baseline. Version 2 kept that
+  // baseline intact; version 3 adds reader brightness and independent quotes;
+  // version 4 records the coordinate unit used by persisted highlights.
+  static const version = 4;
 
   static Future<CodarDatabase> open({String? pathOverride}) async {
     final dir = await getApplicationDocumentsDirectory();
@@ -71,6 +72,7 @@ class CodarDatabase {
           section_index INTEGER NOT NULL,
           start_offset INTEGER NOT NULL,
           end_offset INTEGER NOT NULL,
+          offset_unit TEXT NOT NULL DEFAULT 'unknown',
           cfi TEXT NOT NULL DEFAULT '',
           color INTEGER NOT NULL,
           quoted_text TEXT NOT NULL DEFAULT '',
@@ -133,7 +135,18 @@ class CodarDatabase {
           line_height REAL NOT NULL DEFAULT 1.5,
           margin_px INTEGER NOT NULL DEFAULT 48,
           alignment TEXT NOT NULL DEFAULT 'start',
-          theme TEXT NOT NULL DEFAULT 'light'
+          theme TEXT NOT NULL DEFAULT 'light',
+          brightness REAL
+        )''');
+        await db.execute('''
+        CREATE TABLE quotes(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          book_id TEXT NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
+          section_index INTEGER NOT NULL,
+          char_offset INTEGER NOT NULL DEFAULT 0,
+          cfi TEXT NOT NULL DEFAULT '',
+          quoted_text TEXT NOT NULL,
+          created_at INTEGER NOT NULL
         )''');
         await db.execute('''
         CREATE TABLE app_settings(
@@ -166,6 +179,28 @@ class CodarDatabase {
           // The v1 database already contains all 13 baseline tables. Keep
           // this migration intentionally empty so existing user data is not
           // rewritten or dropped; future schema changes get a new case.
+          break;
+        case 3:
+          await db.execute(
+            'ALTER TABLE reader_settings ADD COLUMN brightness REAL',
+          );
+          await db.execute('''
+            CREATE TABLE quotes(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              book_id TEXT NOT NULL REFERENCES books(book_id) ON DELETE CASCADE,
+              section_index INTEGER NOT NULL,
+              char_offset INTEGER NOT NULL DEFAULT 0,
+              cfi TEXT NOT NULL DEFAULT '',
+              quoted_text TEXT NOT NULL,
+              created_at INTEGER NOT NULL
+            )''');
+          break;
+        case 4:
+          // Preserve old rows as unclassified: previous Reader builds used
+          // both UTF-16 and Rust scalar offsets without recording the unit.
+          await db.execute(
+            "ALTER TABLE highlights ADD COLUMN offset_unit TEXT NOT NULL DEFAULT 'unknown'",
+          );
           break;
         default:
           throw StateError(

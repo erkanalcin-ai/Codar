@@ -87,6 +87,18 @@ class CodarLibStorage {
       }) ??
       false;
 
+  Future<bool> copyExternalToPath({
+    required String uri,
+    required String path,
+    required int maxBytes,
+  }) async =>
+      await _ch.invokeMethod<bool>('copyExternalToPath', {
+        'uri': uri,
+        'path': path,
+        'maxBytes': maxBytes,
+      }) ??
+      false;
+
   Future<List<CodarLibFile>> listCodarLib() async {
     final raw = await _ch.invokeMethod<List<dynamic>>('listCodarLib');
     if (raw == null) throw StateError('listCodarLib returned null');
@@ -108,6 +120,23 @@ class CodarLibStorage {
         .cast<Map<dynamic, dynamic>>()
         .map(CodarTreeFile.fromMap)
         .toList();
+  }
+
+  /// True only when [location] identifies the exact Android storage root
+  /// managed by this app, as defined by MainActivity's write destination.
+  Future<bool> isCodarLibRoot(String location) async {
+    try {
+      return await _ch.invokeMethod<bool>('isCodarLibRoot', {
+            'location': location,
+          }) ??
+          false;
+    } on PlatformException {
+      // An unrecognized SAF provider remains an ordinary external folder.
+      return false;
+    } on MissingPluginException {
+      // Non-Android builds do not expose Android's managed storage root.
+      return false;
+    }
   }
 
   Future<bool> deleteFile(String uri) async {
