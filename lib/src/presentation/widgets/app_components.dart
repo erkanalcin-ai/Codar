@@ -38,12 +38,12 @@ class BookCard extends ConsumerWidget {
       BookCardVariant.grid => _grid(context),
     }));
   }
-  Widget _grid(BuildContext c) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: BookCover(book: book, width: double.infinity, height: double.infinity)), const SizedBox(height: 8), Text(book.title.isEmpty ? '—' : book.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(c).textTheme.titleSmall), if (book.author.isNotEmpty) Text(book.author, maxLines: 1, overflow: TextOverflow.ellipsis, style: Theme.of(c).textTheme.bodySmall)]);
+  Widget _grid(BuildContext c) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Expanded(child: BookCover(book: book, width: double.infinity, height: double.infinity, showTitleFallback: false)), const SizedBox(height: 8), Text(book.title.isEmpty ? '—' : book.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(c).textTheme.titleSmall), if (book.author.isNotEmpty) Text(book.author, maxLines: 1, overflow: TextOverflow.ellipsis, style: Theme.of(c).textTheme.bodySmall)]);
   Widget _horizontal(BuildContext c) {
     final safeProgress = progress == null || !progress!.isFinite
         ? 0.0
         : progress!.clamp(0.0, 1.0).toDouble();
-    return Row(children: [BookCover(book: book, width: 86, height: 124), const SizedBox(width: 14), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [Text(book.title.isEmpty ? '—' : book.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(c).textTheme.titleMedium), if (book.author.isNotEmpty) Text(book.author, style: Theme.of(c).textTheme.bodyMedium), if (progress != null) ...[const SizedBox(height: 14), ProgressIndicatorLine(value: safeProgress)] ]))]);
+    return Row(children: [BookCover(book: book, width: 86, height: 124, showTitleFallback: false), const SizedBox(width: 14), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [Text(book.title.isEmpty ? '—' : book.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(c).textTheme.titleMedium), if (book.author.isNotEmpty) Text(book.author, style: Theme.of(c).textTheme.bodyMedium), if (progress != null) ...[const SizedBox(height: 14), ProgressIndicatorLine(value: safeProgress)] ]))]);
   }
 }
 

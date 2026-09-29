@@ -54,8 +54,9 @@ class ReaderPagination {
       height - pageTopPadding - pageBottomPadding + 42.0;
 
   static List<ReaderBlock> parseSectionContent(
-    reader_dto.SectionContent content,
-  ) {
+    reader_dto.SectionContent content, {
+    bool preserveEmptyTextBlocks = false,
+  }) {
     final images = [
       for (final image in content.images)
         ReaderImage(
@@ -74,7 +75,11 @@ class ReaderPagination {
           rotationDegrees: image.rotationDegrees,
         ),
     ];
-    return parseSectionHtml(content.html, images: images);
+    return parseSectionHtml(
+      content.html,
+      images: images,
+      preserveEmptyTextBlocks: preserveEmptyTextBlocks,
+    );
   }
 
   static List<ReaderPage> paginate(
@@ -107,6 +112,72 @@ class ReaderPagination {
     retainPages: false,
   ).pageCount;
 
+  /// Runs the same pagination algorithm as [countPages], yielding between
+  /// bounded groups of measured page pieces so a loading indicator can paint.
+  static Future<int> countPagesCooperatively(
+    List<ReaderBlock> blocks,
+    ReaderSettingsData settings, {
+    required double viewportWidth,
+    required double viewportHeight,
+    required int engineChars,
+    required Future<void> Function() yieldFrame,
+  }) async => (await _paginateCooperatively(
+    blocks,
+    settings,
+    viewportWidth: viewportWidth,
+    viewportHeight: viewportHeight,
+    engineChars: engineChars,
+    retainPages: false,
+    yieldFrame: yieldFrame,
+  )).pageCount;
+
+  static Future<List<ReaderPage>> paginateCooperatively(
+    List<ReaderBlock> blocks,
+    ReaderSettingsData settings, {
+    required double viewportWidth,
+    required double viewportHeight,
+    required int engineChars,
+    required Future<void> Function() yieldFrame,
+  }) async => (await _paginateCooperatively(
+    blocks,
+    settings,
+    viewportWidth: viewportWidth,
+    viewportHeight: viewportHeight,
+    engineChars: engineChars,
+    retainPages: true,
+    yieldFrame: yieldFrame,
+  )).pages;
+
+  static Future<_PaginationResult> _paginateCooperatively(
+    List<ReaderBlock> blocks,
+    ReaderSettingsData settings, {
+    required double viewportWidth,
+    required double viewportHeight,
+    required int engineChars,
+    required bool retainPages,
+    required Future<void> Function() yieldFrame,
+  }) async {
+    final run = _ReaderPaginationRun(
+      blocks,
+      settings,
+      viewportWidth: viewportWidth,
+      viewportHeight: viewportHeight,
+      engineChars: engineChars,
+      retainPages: retainPages,
+    );
+    var workUnits = 0;
+    final frameBudget = Stopwatch()..start();
+    for (final block in blocks) {
+      workUnits = await run.addBlockCooperatively(
+        block,
+        workUnits: workUnits,
+        frameBudget: frameBudget,
+        yieldFrame: yieldFrame,
+      );
+    }
+    return run.finish();
+  }
+
   static TextStyle styleForBlock(
     TextBlock block,
     ReaderSettingsData settings,
@@ -120,6 +191,11 @@ class ReaderPagination {
     final base = TextStyle(
       fontSize: fontSize,
       height: height,
+      // Text.rich inherits Material 3 bodyMedium's letter spacing and even
+      // leading distribution when a Reader span leaves them unset. Keep both
+      // explicit so TextPainter measures the same rendered paragraph.
+      letterSpacing: 0.25,
+      leadingDistribution: TextLeadingDistribution.even,
       color: color,
       fontFamily: _fontFamily(settings.fontFamily),
     );
@@ -144,115 +220,16 @@ class ReaderPagination {
     required int engineChars,
     required bool retainPages,
   }) {
-    final margin = settings.marginPx.toDouble().clamp(8.0, 96.0).toDouble();
-    final width = math.max(120.0, viewportWidth - margin * 2).toDouble();
-    final height = math.max(220.0, viewportHeight - 42.0).toDouble();
-    final align = switch (settings.alignment) {
-      'end' => TextAlign.end,
-      'center' => TextAlign.center,
-      'justify' => TextAlign.justify,
-      _ => TextAlign.start,
-    };
-    final parsedLength = blocks.fold<int>(
-      0,
-      (total, block) => total + block.plainText.length,
+    final run = _ReaderPaginationRun(
+      blocks,
+      settings,
+      viewportWidth: viewportWidth,
+      viewportHeight: viewportHeight,
+      engineChars: engineChars,
+      retainPages: retainPages,
     );
-    final rawPages = <_RawReaderPage>[];
-    final current = <ReaderBlock>[];
-    var currentBlockCount = 0;
-    var pageCount = 0;
-    var used = 0.0;
-    var currentStart = 0;
-    var parsedCursor = 0;
-
-    void flush() {
-      if (currentBlockCount == 0) return;
-      pageCount++;
-      if (retainPages) {
-        rawPages.add(_RawReaderPage(List.of(current), currentStart));
-      }
-      current.clear();
-      currentBlockCount = 0;
-      used = 0;
-    }
-
-    for (final block in blocks) {
-      if (block is ImageBlock) {
-        flush();
-        if (block.images.isNotEmpty) {
-          pageCount++;
-          if (retainPages) {
-            rawPages.add(_RawReaderPage([block], parsedCursor));
-          }
-        }
-        continue;
-      }
-      final textBlock = block as TextBlock;
-      final text = textBlock.plainText;
-      if (text.isEmpty) continue;
-      var cursor = 0;
-      while (cursor < text.length) {
-        final spacing = currentBlockCount == 0 ? 0.0 : 12.0;
-        final available = height - used - spacing;
-        final end = _fitEnd(
-          textBlock,
-          cursor,
-          width,
-          math.max(1.0, available).toDouble(),
-          settings,
-          align,
-        );
-        if (end <= cursor) {
-          if (currentBlockCount > 0) {
-            flush();
-            continue;
-          }
-          // Keep progress moving when one glyph exceeds the available height.
-          currentStart = parsedCursor + cursor;
-          final forcedEnd = math.min(cursor + 1, text.length);
-          final piece = _sliceBlock(textBlock, cursor, forcedEnd);
-          if (retainPages) current.add(piece);
-          currentBlockCount++;
-          used = _measureBlock(piece, width, settings, align);
-          cursor = forcedEnd;
-          if (cursor < text.length) flush();
-          continue;
-        }
-        if (currentBlockCount == 0) currentStart = parsedCursor + cursor;
-        final piece = _sliceBlock(textBlock, cursor, end);
-        if (retainPages) current.add(piece);
-        currentBlockCount++;
-        used += spacing + _measureBlock(piece, width, settings, align);
-        cursor = end;
-        if (cursor < text.length) flush();
-      }
-      parsedCursor += text.length;
-    }
-    flush();
-    if (pageCount == 0) {
-      return const _PaginationResult(
-        pages: [ReaderPage(blocks: [], startOffset: 0)],
-        pageCount: 1,
-      );
-    }
-    if (!retainPages) {
-      return _PaginationResult(pages: const [], pageCount: pageCount);
-    }
-    return _PaginationResult(
-      pages: [
-        for (final page in rawPages)
-          ReaderPage(
-            blocks: page.blocks,
-            startOffset: parsedLength == 0
-                ? 0
-                : ((page.start / parsedLength) * engineChars)
-                      .round()
-                      .clamp(0, engineChars)
-                      .toInt(),
-          ),
-      ],
-      pageCount: pageCount,
-    );
+    run.addAll(blocks);
+    return run.finish();
   }
 
   static int _fitEnd(
@@ -264,21 +241,49 @@ class ReaderPagination {
     TextAlign align,
   ) {
     final text = block.plainText;
-    final remaining = text.substring(start);
-    if (_measureText(block, remaining, width, settings, align) <= available) {
-      return text.length;
-    }
-    var low = start + 1;
-    var high = text.length;
+    var step = math.min(128, text.length - start);
     var best = start;
-    while (low <= high) {
-      final mid = (low + high) ~/ 2;
-      final candidate = text.substring(start, mid);
-      if (_measureText(block, candidate, width, settings, align) <= available) {
-        best = mid;
-        low = mid + 1;
+    var high = text.length;
+    while (true) {
+      final end = _runeBoundaryAtOrAfter(
+        text,
+        math.min(start + step, text.length),
+      );
+      final candidate = text.substring(start, end);
+      if (_measureText(
+            block,
+            candidate,
+            width,
+            settings,
+            align,
+            startOffset: start,
+          ) <=
+          available) {
+        best = end;
+        if (end == text.length) return text.length;
+        step = math.min(step * 2, text.length - start);
       } else {
-        high = mid - 1;
+        high = end;
+        break;
+      }
+    }
+    var low = best + 1;
+    while (low <= high) {
+      final end = _runeBoundaryAtOrAfter(text, (low + high) ~/ 2);
+      final candidate = text.substring(start, end);
+      if (_measureText(
+            block,
+            candidate,
+            width,
+            settings,
+            align,
+            startOffset: start,
+          ) <=
+          available) {
+        best = end;
+        low = end + 1;
+      } else {
+        high = math.max(start, _previousRuneBoundary(text, end));
       }
     }
     if (best <= start) return start;
@@ -287,6 +292,29 @@ class ReaderPagination {
       boundary--;
     }
     return boundary > start ? boundary : best;
+  }
+
+  static int _runeBoundaryAtOrAfter(String text, int offset) {
+    if (offset <= 0 || offset >= text.length) return offset;
+    final before = text.codeUnitAt(offset - 1);
+    final after = text.codeUnitAt(offset);
+    return before >= 0xd800 && before <= 0xdbff &&
+            after >= 0xdc00 && after <= 0xdfff
+        ? offset + 1
+        : offset;
+  }
+
+  static int _previousRuneBoundary(String text, int offset) {
+    if (offset <= 0) return 0;
+    if (offset >= 2) {
+      final before = text.codeUnitAt(offset - 2);
+      final after = text.codeUnitAt(offset - 1);
+      if (before >= 0xd800 && before <= 0xdbff &&
+          after >= 0xdc00 && after <= 0xdfff) {
+        return offset - 2;
+      }
+    }
+    return offset - 1;
   }
 
   static double _measureBlock(
@@ -301,16 +329,71 @@ class ReaderPagination {
     String text,
     double width,
     ReaderSettingsData settings,
-    TextAlign align,
-  ) {
+    TextAlign align, {
+    int startOffset = 0,
+  }) {
     final style = styleForBlock(block, settings, const Color(0xFF111111));
-    final prefix = block.kind == 'li' ? '• ' : '';
-    final painter = TextPainter(
-      text: TextSpan(text: '$prefix$text', style: style),
-      textAlign: align,
-      textDirection: TextDirection.ltr,
-    )..layout(maxWidth: width);
+    final bulletWidth = block.kind == 'li'
+        ? _measureInlineText('•', style)
+        : 0.0;
+    final painter =
+        TextPainter(
+          text: _styledSpanForRange(
+            block,
+            startOffset,
+            startOffset + text.length,
+            style,
+          ),
+          textAlign: align,
+          textDirection: TextDirection.ltr,
+        )..layout(
+          maxWidth: math.max(
+            1.0,
+            width - bulletWidth - (block.kind == 'li' ? 8.0 : 0.0),
+          ),
+        );
     return painter.height;
+  }
+
+  static TextSpan _styledSpanForRange(
+    TextBlock block,
+    int start,
+    int end,
+    TextStyle baseStyle,
+  ) {
+    final children = <InlineSpan>[];
+    var cursor = 0;
+    for (final part in block.parts) {
+      final partEnd = cursor + part.text.length;
+      final from = math.max(start, cursor);
+      final to = math.min(end, partEnd);
+      if (to > from) {
+        children.add(
+          TextSpan(
+            text: part.text.substring(from - cursor, to - cursor),
+            style: baseStyle.copyWith(
+              fontWeight: part.bold ? FontWeight.bold : null,
+              fontStyle: part.italic ? FontStyle.italic : null,
+            ),
+          ),
+        );
+      }
+      cursor = partEnd;
+      if (cursor >= end) break;
+    }
+    if (children.isEmpty && end > start) {
+      final text = block.plainText.substring(start, end);
+      return TextSpan(text: text, style: baseStyle);
+    }
+    return TextSpan(style: baseStyle, children: children);
+  }
+
+  static double _measureInlineText(String text, TextStyle style) {
+    final painter = TextPainter(
+      text: TextSpan(text: text, style: style),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    return painter.width;
   }
 
   static TextBlock _sliceBlock(TextBlock block, int start, int end) {
@@ -353,6 +436,184 @@ class ReaderPagination {
     'Atkinson Hyperlegible' => 'AtkinsonHyperlegible',
     _ => null,
   };
+}
+
+class _ReaderPaginationRun {
+  _ReaderPaginationRun(
+    this.blocks,
+    this.settings, {
+    required double viewportWidth,
+    required double viewportHeight,
+    required this.engineChars,
+    required this.retainPages,
+  }) : width = math
+           .max(
+             120.0,
+             viewportWidth -
+                 settings.marginPx.toDouble().clamp(8.0, 96.0).toDouble() * 2,
+           )
+           .toDouble(),
+       height = math.max(220.0, viewportHeight - 42.0).toDouble(),
+       align = switch (settings.alignment) {
+         'end' => TextAlign.end,
+         'center' => TextAlign.center,
+         'justify' => TextAlign.justify,
+         _ => TextAlign.start,
+       },
+       parsedLength = blocks.fold<int>(
+         0,
+         (total, block) => total + block.plainText.length,
+       );
+
+  final List<ReaderBlock> blocks;
+  final ReaderSettingsData settings;
+  final int engineChars;
+  final bool retainPages;
+  final double width;
+  final double height;
+  final TextAlign align;
+  final int parsedLength;
+  final List<_RawReaderPage> _rawPages = [];
+  final List<ReaderBlock> _current = [];
+  int _currentBlockCount = 0;
+  int _pageCount = 0;
+  double _used = 0;
+  int _currentStart = 0;
+  int _parsedCursor = 0;
+
+  void addAll(Iterable<ReaderBlock> items) {
+    for (final block in items) {
+      addBlock(block);
+    }
+  }
+
+  void addBlock(ReaderBlock block) {
+    if (block is ImageBlock) {
+      _addImageBlock(block);
+      return;
+    }
+    final textBlock = block as TextBlock;
+    final text = textBlock.plainText;
+    if (text.isEmpty) return;
+    var cursor = 0;
+    while (cursor < text.length) {
+      cursor = _addTextPiece(textBlock, cursor);
+    }
+    _parsedCursor += text.length;
+  }
+
+  Future<int> addBlockCooperatively(
+    ReaderBlock block, {
+    required int workUnits,
+    required Stopwatch frameBudget,
+    required Future<void> Function() yieldFrame,
+  }) async {
+    if (block is ImageBlock) {
+      _addImageBlock(block);
+      return workUnits + 1;
+    }
+    final textBlock = block as TextBlock;
+    final text = textBlock.plainText;
+    if (text.isEmpty) return workUnits;
+    var cursor = 0;
+    while (cursor < text.length) {
+      cursor = _addTextPiece(textBlock, cursor);
+      workUnits++;
+      if (workUnits >= 8 || frameBudget.elapsedMicroseconds >= 6000) {
+        await yieldFrame();
+        workUnits = 0;
+        frameBudget.reset();
+      }
+    }
+    _parsedCursor += text.length;
+    return workUnits;
+  }
+
+  void _addImageBlock(ImageBlock block) {
+    _flush();
+    if (block.images.isEmpty) return;
+    _pageCount++;
+    if (retainPages) _rawPages.add(_RawReaderPage([block], _parsedCursor));
+  }
+
+  int _addTextPiece(TextBlock block, int cursor) {
+    final text = block.plainText;
+    final spacing = _currentBlockCount == 0 ? 0.0 : 12.0;
+    final available = height - _used - spacing;
+    final end = ReaderPagination._fitEnd(
+      block,
+      cursor,
+      width,
+      math.max(1.0, available).toDouble(),
+      settings,
+      align,
+    );
+    if (end <= cursor) {
+      if (_currentBlockCount > 0) {
+        _flush();
+        return cursor;
+      }
+      // Keep progress moving when one glyph exceeds the available height.
+      _currentStart = _parsedCursor + cursor;
+      final forcedEnd = ReaderPagination._runeBoundaryAtOrAfter(
+        text,
+        math.min(cursor + 1, text.length),
+      );
+      final piece = ReaderPagination._sliceBlock(block, cursor, forcedEnd);
+      if (retainPages) _current.add(piece);
+      _currentBlockCount++;
+      _used = ReaderPagination._measureBlock(piece, width, settings, align);
+      if (forcedEnd < text.length) _flush();
+      return forcedEnd;
+    }
+    if (_currentBlockCount == 0) _currentStart = _parsedCursor + cursor;
+    final piece = ReaderPagination._sliceBlock(block, cursor, end);
+    if (retainPages) _current.add(piece);
+    _currentBlockCount++;
+    _used +=
+        spacing + ReaderPagination._measureBlock(piece, width, settings, align);
+    if (end < text.length) _flush();
+    return end;
+  }
+
+  void _flush() {
+    if (_currentBlockCount == 0) return;
+    _pageCount++;
+    if (retainPages) {
+      _rawPages.add(_RawReaderPage(List.of(_current), _currentStart));
+    }
+    _current.clear();
+    _currentBlockCount = 0;
+    _used = 0;
+  }
+
+  _PaginationResult finish() {
+    _flush();
+    if (_pageCount == 0) {
+      return const _PaginationResult(
+        pages: [ReaderPage(blocks: [], startOffset: 0)],
+        pageCount: 1,
+      );
+    }
+    if (!retainPages) {
+      return _PaginationResult(pages: const [], pageCount: _pageCount);
+    }
+    return _PaginationResult(
+      pages: [
+        for (final page in _rawPages)
+          ReaderPage(
+            blocks: page.blocks,
+            startOffset: parsedLength == 0
+                ? 0
+                : ((page.start / parsedLength) * engineChars)
+                      .round()
+                      .clamp(0, engineChars)
+                      .toInt(),
+          ),
+      ],
+      pageCount: _pageCount,
+    );
+  }
 }
 
 class ReaderPage {

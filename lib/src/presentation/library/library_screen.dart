@@ -2,12 +2,11 @@ import 'package:codar/src/app/providers.dart';
 import 'package:codar/src/brand/codar_brand.dart';
 import 'package:codar/src/l10n/strings.dart';
 import 'package:codar/src/library/import_service.dart';
+import 'package:codar/src/presentation/library/library_import_source_sheet.dart';
 import 'package:codar/src/presentation/widgets/app_components.dart';
 import 'package:codar/src/reader/locator_nav.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-
-enum _ImportMode { files, folder }
 
 class LibraryScreen extends ConsumerStatefulWidget {
   const LibraryScreen({super.key});
@@ -230,27 +229,12 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
   Future<void> _import(BuildContext context) async {
     if (_importing) return;
     final locale = ref.read(localeProvider);
-    final mode = await showModalBottomSheet<_ImportMode>(
+    final mode = await showModalBottomSheet<LibraryImportMode>(
       context: context,
-      builder: (sheetContext) => SafeArea(
-        child: Wrap(
-          children: [
-            ListTile(
-              title: Text(tr(locale, 'chooseImportSource')),
-              leading: const Icon(Icons.library_add_outlined),
-            ),
-            ListTile(
-              leading: const Icon(Icons.insert_drive_file_outlined),
-              title: Text(tr(locale, 'pickFiles')),
-              onTap: () => Navigator.pop(sheetContext, _ImportMode.files),
-            ),
-            ListTile(
-              leading: const Icon(Icons.folder_outlined),
-              title: Text(tr(locale, 'pickFolder')),
-              onTap: () => Navigator.pop(sheetContext, _ImportMode.folder),
-            ),
-          ],
-        ),
+      builder: (sheetContext) => LibraryImportSourceSheet(
+        filesLabel: tr(locale, 'pickFiles'),
+        folderLabel: tr(locale, 'pickFolder'),
+        onSelected: (mode) => Navigator.pop(sheetContext, mode),
       ),
     );
     if (!mounted || mode == null) return;
@@ -264,7 +248,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
 
     try {
       final service = ref.read(importServiceProvider);
-      final result = mode == _ImportMode.files
+      final result = mode == LibraryImportMode.files
           ? await service.importFilesWithPicker(onProgress: _onProgress)
           : await service.importFolderWithPicker(onProgress: _onProgress);
       if (!mounted || !context.mounted || result == null) return;

@@ -16,9 +16,15 @@ import 'package:codar/src/l10n/strings.dart';
 import 'package:codar/src/reader/html_blocks.dart';
 import 'package:codar/src/reader/highlight_range.dart';
 import 'package:codar/src/reader/page_count_index.dart';
+import 'package:codar/src/reader/page_count_cache.dart';
 import 'package:codar/src/reader/reader_pagination.dart';
 import 'package:codar/src/reader/reader_image_view.dart';
 import 'package:codar/src/reader/reader_service.dart';
+import 'package:codar/src/reader/reader_bookmark_state.dart';
+import 'package:codar/src/reader/quote_range.dart';
+import 'package:codar/src/reader/reader_reflow_coalescer.dart';
+import 'package:codar/src/reader/selection_geometry.dart';
+import 'package:codar/src/reader/selection_popup_placement.dart';
 import 'package:codar/src/reader/text_selection_offsets.dart';
 import 'package:codar/src/rust/frb_generated.dart/reader/content.dart'
     as reader_dto;
@@ -187,16 +193,22 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   String _enginePlain = '';
   int _engineChars = 0;
   List<HighlightRecord> _highlights = const [];
+  final ReaderBookmarkState _bookmarkState = ReaderBookmarkState();
+  List<QuoteRecord> _quotes = const [];
+  final Map<int, List<ReaderQuoteRange>> _quoteHighlightsBySection = {};
   _PendingSelection? _pending;
   final Map<Object, _BlockSelection> _selectedBlockRanges = {};
+  final Map<Object, List<Rect>> _selectedBlockRects = {};
   bool _selectionChanging = false;
   bool _keepSelectionAfterHighlightUpdate = false;
   Offset? _selectionAnchor;
   bool _loading = true;
   bool _saving = false;
+  bool _bookmarkSaving = false;
   bool _controlsVisible = false;
   Timer? _controlsTimer;
   Timer? _progressSaveTimer;
+  Timer? _layoutReflowTimer;
   _PendingProgressSave? _pendingProgressSave;
   Future<void> _progressSaveTail = Future.value();
   Offset? _pointerDown;
@@ -204,11 +216,17 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   Size? _paginationViewport;
   bool _viewportReflowScheduled = false;
   bool _pendingViewportReflow = false;
+  int _layoutReflowRevision = 0;
+  int? _activeLayoutReflowRevision;
+  bool _layoutReflowPending = false;
+  Object? _layoutReflowError;
   final _pageController = PageController();
   final _scrollController = ScrollController();
   final _continuousPageNotifier = ValueNotifier<int>(0);
+  final _reflowCoalescer = ReaderReflowCoalescer();
   final _regionFocus = FocusNode();
   final _regionKey = GlobalKey<SelectableRegionState>();
+  final _readerStackKey = GlobalKey();
   static const _pageTopPadding = ReaderPagination.pageTopPadding;
   static const _pageBottomPadding = ReaderPagination.pageBottomPadding;
 
@@ -225,6 +243,25 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     });
     ref.listenManual(readerSettingsProvider, (previous, next) {
       _setReaderBrightness(next.brightness);
+      final layoutChanged =
+          previous != null &&
+          (previous.fontFamily != next.fontFamily ||
+              previous.fontSizePx != next.fontSizePx ||
+              previous.lineHeight != next.lineHeight ||
+              previous.marginPx != next.marginPx ||
+              previous.alignment != next.alignment);
+      if (layoutChanged) {
+        final revision = ++_layoutReflowRevision;
+        _markLayoutReflowPending();
+        if (_isPdf) {
+          _scheduleDebouncedLayoutReflow(revision);
+          return;
+        }
+        final scheduledRevision = _reflowCoalescer.request(revision);
+        if (scheduledRevision != null) {
+          _scheduleDebouncedLayoutReflow(scheduledRevision);
+        }
+      }
     });
     _open();
   }
@@ -236,22 +273,72 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     final previous = _paginationViewport;
     _paginationViewport = viewport;
     if (previous != null && previous != viewport && _session != null) {
-      _scheduleViewportReflow();
+      final revision = ++_layoutReflowRevision;
+      _markLayoutReflowPending();
+      _scheduleViewportReflow(revision: revision);
     }
   }
 
-  void _scheduleViewportReflow() {
+  void _markLayoutReflowPending() {
+    if (!mounted || (_layoutReflowPending && _layoutReflowError == null)) {
+      return;
+    }
+    setState(() {
+      _layoutReflowPending = true;
+      _layoutReflowError = null;
+    });
+  }
+
+  void _retryLayoutReflow() {
+    _markLayoutReflowPending();
+    _scheduleViewportReflow(revision: _layoutReflowRevision);
+  }
+
+  void _scheduleDebouncedLayoutReflow(int revision) {
+    _layoutReflowTimer?.cancel();
+    _layoutReflowTimer = Timer(
+      const Duration(milliseconds: 180),
+      () => _scheduleViewportReflow(revision: revision),
+    );
+  }
+
+  void _beginLayoutSliderChange() {
+    _reflowCoalescer.beginInteraction();
+    _layoutReflowTimer?.cancel();
+    if (_layoutReflowPending) {
+      _reflowCoalescer.defer(_layoutReflowRevision);
+    }
+  }
+
+  void _endLayoutSliderChange() {
+    final revision = _reflowCoalescer.endInteraction();
+    if (revision != null) _scheduleDebouncedLayoutReflow(revision);
+  }
+
+  void _scheduleViewportReflow({int? revision}) {
+    final requestedRevision = revision ?? _layoutReflowRevision;
     if (_viewportReflowScheduled) return;
     _viewportReflowScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _viewportReflowScheduled = false;
-      if (!mounted || _session == null) return;
+      if (!mounted) return;
+      if (_session == null) {
+        _pendingViewportReflow = true;
+        return;
+      }
+      if (requestedRevision != _layoutReflowRevision) {
+        _scheduleViewportReflow(revision: _layoutReflowRevision);
+        return;
+      }
       if (_loading) {
         _pendingViewportReflow = true;
         return;
       }
-      if (_continuousPages.isEmpty) return;
       _pendingViewportReflow = false;
+      if (_continuousPages.isEmpty) {
+        unawaited(_reflowCurrentSection(requestedRevision));
+        return;
+      }
       final active =
           _continuousPages[_continuousIndex.clamp(
             0,
@@ -259,9 +346,78 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
           )];
       final section = active.section.index;
       final offset = active.page.startOffset;
+      final reusableSections = <int, _ReaderSection>{};
+      if (!_isPdf) {
+        for (final page in _continuousPages) {
+          if (!page.section.isPlaceholder) {
+            reusableSections.putIfAbsent(
+              page.section.index,
+              () => page.section,
+            );
+          }
+        }
+      }
       if (_isPdf) _pdfSectionCache.clear();
-      unawaited(_loadBook(section, offset: offset, persistProgress: false));
+      unawaited(
+        _loadBook(
+          section,
+          offset: offset,
+          persistProgress: false,
+          layoutRevision: requestedRevision,
+          reusableSections: reusableSections,
+        ),
+      );
     });
+  }
+
+  Future<void> _reflowCurrentSection(int revision) async {
+    if (_blocks.isEmpty) {
+      if (mounted && revision == _layoutReflowRevision) {
+        setState(() => _layoutReflowPending = false);
+      }
+      return;
+    }
+    if (_activeLayoutReflowRevision == revision) return;
+    _activeLayoutReflowRevision = revision;
+    final previousOffset = _currentPageOffset;
+    final settings = ref.read(readerSettingsProvider);
+    final viewport = MediaQuery.sizeOf(context);
+    try {
+      final pages = await _paginateBlocksCooperatively(
+        _blocks,
+        settings,
+        viewportWidth: viewport.width,
+        viewportHeight: _paginationViewportHeight(viewport.height),
+        engineChars: _engineChars,
+      );
+      if (!mounted || revision != _layoutReflowRevision) return;
+      final page = _pageForOffset(pages, previousOffset);
+      setState(() {
+        _pages = pages;
+        _pageIndex = page;
+        _layoutReflowPending = false;
+        _layoutReflowError = null;
+      });
+      if (_activeLayoutReflowRevision == revision) {
+        _activeLayoutReflowRevision = null;
+      }
+      _programmaticPageChange = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && revision == _layoutReflowRevision) {
+          if (_pageController.hasClients) _pageController.jumpToPage(page);
+        }
+        _programmaticPageChange = false;
+      });
+    } catch (error) {
+      if (!mounted || revision != _layoutReflowRevision) return;
+      if (_activeLayoutReflowRevision == revision) {
+        _activeLayoutReflowRevision = null;
+      }
+      setState(() {
+        _layoutReflowPending = false;
+        _layoutReflowError = error;
+      });
+    }
   }
 
   @override
@@ -277,6 +433,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     _setReaderBrightness(null);
     _controlsTimer?.cancel();
     _progressSaveTimer?.cancel();
+    _layoutReflowTimer?.cancel();
     _pageController.dispose();
     _scrollController.dispose();
     _continuousPageNotifier.dispose();
@@ -351,6 +508,29 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         verifyCfi: widget.initialCfi,
         persistProgress: !keepSavedLocator,
       );
+      try {
+        final bookmarks = await ref
+            .read(annotationsRepoProvider)
+            .allBookmarks(widget.bookId);
+        if (!mounted) return;
+        setState(() {
+          _bookmarkState.restore(bookmarks);
+        });
+      } catch (_) {
+        // Bookmark state is optional UI metadata; opening the book stays usable.
+      }
+      try {
+        final quotes = await ref
+            .read(annotationsRepoProvider)
+            .allQuotes(widget.bookId);
+        if (!mounted) return;
+        setState(() {
+          _quotes = quotes;
+          _quoteHighlightsBySection.clear();
+        });
+      } catch (_) {
+        // Quote styling is optional UI metadata; saved records remain intact.
+      }
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -369,11 +549,21 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     double? progression,
     String? verifyCfi,
     required bool persistProgress,
+    int? layoutRevision,
+    Map<int, _ReaderSection> reusableSections = const {},
   }) async {
     final session = _session;
     if (session == null) return;
-    setState(() => _loading = true);
+    if (layoutRevision != null) {
+      if (_activeLayoutReflowRevision == layoutRevision) return;
+      _activeLayoutReflowRevision = layoutRevision;
+    }
+    if (layoutRevision == null) setState(() => _loading = true);
     try {
+      // Give the Reader-specific loading view a frame before pagination work.
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+      if (_isObsoleteLayout(layoutRevision)) return;
       final pages = <_ContinuousPage>[];
       var preparedSectionIndex = startSection;
       ReaderPageCountIndex? pageCountIndex;
@@ -381,6 +571,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         // Resolve the opening page before building the stream so its extracted
         // reader pages can occupy separate, fixed-height scroll entries.
         await _loadPdfSection(startSection);
+        if (_isObsoleteLayout(layoutRevision)) return;
         for (var index = 0; index < _sectionCount; index++) {
           final loaded = _pdfSectionCache[index];
           pages.addAll(
@@ -395,6 +586,21 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         final sectionPageCounts = List<int>.filled(_sectionCount, 1);
         final countedSections = List<bool>.filled(_sectionCount, false);
 
+        Future<_ReaderSection> prepareSection(int index) {
+          final cached = reusableSections[index];
+          return cached == null
+              ? _readContinuousSection(
+                  index,
+                  paginationSettings: paginationSettings,
+                  paginationViewport: paginationViewport,
+                )
+              : _reflowLoadedContinuousSection(
+                  cached,
+                  paginationSettings,
+                  paginationViewport,
+                );
+        }
+
         void recordCount(_ReaderSection section) {
           sectionPageCounts[section.index] = _isEmptyContinuousSection(section)
               ? 0
@@ -402,19 +608,13 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
           countedSections[section.index] = true;
         }
 
-        var openingSection = await _readContinuousSection(
-          startSection,
-          paginationSettings: paginationSettings,
-          paginationViewport: paginationViewport,
-        );
+        var openingSection = await prepareSection(startSection);
+        if (_isObsoleteLayout(layoutRevision)) return;
         recordCount(openingSection);
         if (_isEmptyContinuousSection(openingSection)) {
           for (var index = startSection + 1; index < _sectionCount; index++) {
-            final candidate = await _readContinuousSection(
-              index,
-              paginationSettings: paginationSettings,
-              paginationViewport: paginationViewport,
-            );
+            final candidate = await prepareSection(index);
+            if (_isObsoleteLayout(layoutRevision)) return;
             recordCount(candidate);
             if (!_isEmptyContinuousSection(candidate)) {
               openingSection = candidate;
@@ -424,11 +624,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         }
         if (_isEmptyContinuousSection(openingSection)) {
           for (var index = startSection - 1; index >= 0; index--) {
-            final candidate = await _readContinuousSection(
-              index,
-              paginationSettings: paginationSettings,
-              paginationViewport: paginationViewport,
-            );
+            final candidate = await prepareSection(index);
+            if (_isObsoleteLayout(layoutRevision)) return;
             recordCount(candidate);
             if (!_isEmptyContinuousSection(candidate)) {
               openingSection = candidate;
@@ -447,11 +644,22 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
           // still starts with placeholders for every unopened section.
           for (var index = 0; index < _sectionCount; index++) {
             if (countedSections[index]) continue;
-            sectionPageCounts[index] = await _countContinuousSectionPages(
-              index,
-              settings: paginationSettings,
-              viewport: paginationViewport,
-            );
+            if ((index - startSection).abs() % 4 == 0) {
+              await WidgetsBinding.instance.endOfFrame;
+            }
+            final cached = reusableSections[index];
+            sectionPageCounts[index] = cached == null
+                ? await _countContinuousSectionPages(
+                    index,
+                    settings: paginationSettings,
+                    viewport: paginationViewport,
+                  )
+                : await _countLoadedContinuousSectionPages(
+                    cached,
+                    settings: paginationSettings,
+                    viewport: paginationViewport,
+                  );
+            if (_isObsoleteLayout(layoutRevision)) return;
             countedSections[index] = true;
           }
           pageCountIndex = ReaderPageCountIndex(sectionPageCounts);
@@ -497,7 +705,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                 .toInt()]
           : active.page;
 
-      if (!mounted) return;
+      if (!mounted || _isObsoleteLayout(layoutRevision)) return;
       setState(() {
         _continuousPages = pages;
         _continuousPageCountIndex = pageCountIndex;
@@ -511,7 +719,15 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         _highlights = activeSection.highlights;
         _pending = null;
         _loading = false;
+        if (layoutRevision != null) {
+          _layoutReflowPending = false;
+          _layoutReflowError = null;
+        }
       });
+      if (layoutRevision != null &&
+          _activeLayoutReflowRevision == layoutRevision) {
+        _activeLayoutReflowRevision = null;
+      }
       _continuousPageNotifier.value = target;
       _programmaticPageChange = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -537,15 +753,27 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         _scheduleViewportReflow();
       }
     } catch (e) {
+      if (_isObsoleteLayout(layoutRevision)) return;
       if (mounted) {
+        if (layoutRevision != null &&
+            _activeLayoutReflowRevision == layoutRevision) {
+          _activeLayoutReflowRevision = null;
+        }
         setState(() {
           _error = '$e';
           _loading = false;
+          if (layoutRevision != null) {
+            _layoutReflowPending = false;
+            _layoutReflowError = e;
+          }
         });
       }
       _pendingViewportReflow = false;
     }
   }
+
+  bool _isObsoleteLayout(int? revision) =>
+      revision != null && revision != _layoutReflowRevision;
 
   Future<_ReaderSection> _readContinuousSection(
     int index, {
@@ -568,12 +796,24 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       blocks,
       storedHighlights,
     );
-    final sectionPages = _paginateBlocks(
+    final sectionPages = await _paginateBlocksCooperatively(
       blocks,
       settings!,
       viewportWidth: viewport.width,
       viewportHeight: _paginationViewportHeight(viewport.height),
       engineChars: content.charCount.toInt(),
+    );
+    readerPageCountCache.put(
+      ReaderPageCountCache.keyFor(
+        bookId: widget.bookId,
+        sectionIndex: index,
+        content: content,
+        settings: settings,
+        viewportWidth: viewport.width,
+        viewportHeight: _paginationViewportHeight(viewport.height),
+        engineChars: content.charCount.toInt(),
+      ),
+      sectionPages.length,
     );
     return _ReaderSection(
       index: index,
@@ -582,6 +822,28 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       enginePlain: content.plainText,
       engineChars: content.charCount.toInt(),
       highlights: highlights,
+    );
+  }
+
+  Future<_ReaderSection> _reflowLoadedContinuousSection(
+    _ReaderSection section,
+    ReaderSettingsData settings,
+    Size viewport,
+  ) async {
+    final pages = await _paginateBlocksCooperatively(
+      section.blocks,
+      settings,
+      viewportWidth: viewport.width,
+      viewportHeight: _paginationViewportHeight(viewport.height),
+      engineChars: section.engineChars,
+    );
+    return _ReaderSection(
+      index: section.index,
+      blocks: section.blocks,
+      pages: pages,
+      enginePlain: section.enginePlain,
+      engineChars: section.engineChars,
+      highlights: section.highlights,
     );
   }
 
@@ -594,14 +856,44 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     if (session == null) throw StateError('reader-closed');
     final content = await _readerSvc.getContent(session, index);
     if (!mounted) throw StateError('reader-closed');
+    final cacheKey = ReaderPageCountCache.keyFor(
+      bookId: widget.bookId,
+      sectionIndex: index,
+      content: content,
+      settings: settings,
+      viewportWidth: viewport.width,
+      viewportHeight: _paginationViewportHeight(viewport.height),
+      engineChars: content.charCount.toInt(),
+    );
+    final cachedCount = readerPageCountCache.get(cacheKey);
+    if (cachedCount != null) return cachedCount;
     final blocks = ReaderPagination.parseSectionContent(content);
     if (blocks.isEmpty) return 0;
-    return _countPaginatedBlocks(
+    final count = await ReaderPagination.countPagesCooperatively(
       blocks,
       settings,
       viewportWidth: viewport.width,
       viewportHeight: _paginationViewportHeight(viewport.height),
       engineChars: content.charCount.toInt(),
+      yieldFrame: () => WidgetsBinding.instance.endOfFrame,
+    );
+    readerPageCountCache.put(cacheKey, count);
+    return count;
+  }
+
+  Future<int> _countLoadedContinuousSectionPages(
+    _ReaderSection section, {
+    required ReaderSettingsData settings,
+    required Size viewport,
+  }) {
+    if (section.blocks.isEmpty) return Future.value(0);
+    return ReaderPagination.countPagesCooperatively(
+      section.blocks,
+      settings,
+      viewportWidth: viewport.width,
+      viewportHeight: _paginationViewportHeight(viewport.height),
+      engineChars: section.engineChars,
+      yieldFrame: () => WidgetsBinding.instance.endOfFrame,
     );
   }
 
@@ -610,7 +902,10 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
 
   List<ReaderBlock> _parseReaderBlocks(reader_dto.SectionContent content) {
     return ReaderTextSelectionOffsets.alignBlocks(
-      ReaderPagination.parseSectionContent(content),
+      ReaderPagination.parseSectionContent(
+        content,
+        preserveEmptyTextBlocks: true,
+      ),
       content.plainText,
       sourceHtml: content.html,
     );
@@ -865,7 +1160,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       if (!mounted) return;
       final settings = ref.read(readerSettingsProvider);
       final viewport = MediaQuery.sizeOf(context);
-      final pages = _paginateBlocks(
+      final pages = await _paginateBlocksCooperatively(
         blocks,
         settings,
         viewportWidth: viewport.width,
@@ -1295,18 +1590,19 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     engineChars: engineChars,
   );
 
-  int _countPaginatedBlocks(
+  Future<List<_ReaderPage>> _paginateBlocksCooperatively(
     List<ReaderBlock> blocks,
     ReaderSettingsData settings, {
     required double viewportWidth,
     required double viewportHeight,
     required int engineChars,
-  }) => ReaderPagination.countPages(
+  }) => ReaderPagination.paginateCooperatively(
     blocks,
     settings,
     viewportWidth: viewportWidth,
     viewportHeight: viewportHeight,
     engineChars: engineChars,
+    yieldFrame: () => WidgetsBinding.instance.endOfFrame,
   );
 
   int _pageForOffset(List<_ReaderPage> pages, int offset) {
@@ -1341,6 +1637,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   void _onSelectionChanged(SelectedContent? content) {
     if ((content?.plainText ?? '').trim().isEmpty) {
       _selectedBlockRanges.clear();
+      _selectedBlockRects.clear();
       if (mounted) {
         setState(() {
           _pending = null;
@@ -1371,6 +1668,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     int sectionIndex,
     TextBlock block,
     SelectedContentRange? range,
+    List<Rect> selectionRects,
   ) {
     // Repainting TextSpan boundaries after a highlight can make Flutter emit
     // a transient local range for the same live selection. Keep the source
@@ -1378,6 +1676,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     if (_keepSelectionAfterHighlightUpdate) return;
     if (range == null) {
       _selectedBlockRanges.remove(blockKey);
+      _selectedBlockRects.remove(blockKey);
     } else {
       final mapped = ReaderTextSelectionOffsets.sourceRangeFor(
         block,
@@ -1386,12 +1685,18 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       );
       if (mapped == null) {
         _selectedBlockRanges.remove(blockKey);
+        _selectedBlockRects.remove(blockKey);
       } else {
         _selectedBlockRanges[blockKey] = _BlockSelection(
           sectionIndex,
           mapped.$1,
           mapped.$2,
         );
+        if (selectionRects.isEmpty) {
+          _selectedBlockRects.remove(blockKey);
+        } else {
+          _selectedBlockRects[blockKey] = selectionRects;
+        }
       }
     }
     if (!_selectionChanging) _refreshPendingSelection();
@@ -1500,9 +1805,9 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         first.sectionIndex,
         first.start,
       );
-      await ref
+      final stored = await ref
           .read(annotationsRepoProvider)
-          .addQuote(
+          .toggleQuote(
             QuoteRecord(
               bookId: widget.bookId,
               sectionIndex: first.sectionIndex,
@@ -1511,8 +1816,22 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
               quotedText: pending.text,
             ),
           );
+      if (!mounted) return;
+      setState(() {
+        _quotes = [
+          ?stored,
+          ..._quotes.where(
+            (quote) =>
+                quote.bookId != widget.bookId ||
+                quote.sectionIndex != first.sectionIndex ||
+                quote.charOffset != first.start ||
+                quote.quotedText != pending.text,
+          ),
+        ];
+        _quoteHighlightsBySection.remove(first.sectionIndex);
+        _saving = false;
+      });
       _clearSelection();
-      if (mounted) setState(() => _saving = false);
     } catch (_) {
       if (mounted) setState(() => _saving = false);
     }
@@ -1640,6 +1959,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   void _clearSelection() {
     _keepSelectionAfterHighlightUpdate = false;
     _selectedBlockRanges.clear();
+    _selectedBlockRects.clear();
     _regionKey.currentState?.clearSelection();
     if (mounted) {
       setState(() {
@@ -1715,34 +2035,58 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     } catch (_) {}
   }
 
-  Future<void> _addBookmark() async {
+  Future<void> _toggleBookmark() async {
     final session = _session;
-    if (session == null) return;
+    final sectionIndex = _section;
+    final offset = _currentPageOffset;
+    if (session == null || _bookmarkSaving) return;
+    setState(() => _bookmarkSaving = true);
     try {
+      final annotations = ref.read(annotationsRepoProvider);
+      if (_bookmarkState.contains(sectionIndex, offset)) {
+        await annotations.deleteBookmarksAt(
+          bookId: widget.bookId,
+          sectionIndex: sectionIndex,
+          charOffset: offset,
+        );
+        if (mounted) {
+          setState(() {
+            _bookmarkState.remove(sectionIndex, offset);
+            _bookmarkSaving = false;
+          });
+        }
+        return;
+      }
       final svc = ref.read(readerServiceProvider);
-      final offset = _currentPageOffset;
-      final locator = await svc.getLocator(session, _section, offset);
-      await ref
-          .read(annotationsRepoProvider)
-          .addBookmark(
-            BookmarkRecord(
-              bookId: widget.bookId,
-              sectionIndex: _section,
-              cfi: _cfiOf(locator),
-              charOffset: offset,
-              label:
-                  '${tr(ref.read(localeProvider), 'sectionOf')} ${_section + 1}',
-            ),
-          );
+      final locator = await svc.getLocator(session, sectionIndex, offset);
+      await annotations.addBookmark(
+        BookmarkRecord(
+          bookId: widget.bookId,
+          sectionIndex: sectionIndex,
+          cfi: _cfiOf(locator),
+          charOffset: offset,
+          label:
+              '${tr(ref.read(localeProvider), 'sectionOf')} ${sectionIndex + 1}',
+        ),
+      );
       if (mounted) {
+        setState(() {
+          _bookmarkState.add(sectionIndex, offset);
+          _bookmarkSaving = false;
+        });
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(tr(ref.read(localeProvider), 'bookmarkAdded')),
           ),
         );
       }
-    } catch (_) {}
+    } catch (_) {
+      if (mounted) setState(() => _bookmarkSaving = false);
+    }
   }
+
+  bool get _currentPageHasBookmark =>
+      _bookmarkState.contains(_section, _currentPageOffset);
 
   Future<void> _addNote() async {
     final locale = ref.read(localeProvider);
@@ -1855,9 +2199,12 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
             draft = next;
             setSheetState(() {});
             ref.read(readerSettingsProvider.notifier).set(next);
-            ref.read(settingsRepoProvider).saveReaderSettings(next);
+            unawaited(ref.read(settingsRepoProvider).saveReaderSettings(next));
             _setReaderSystemUi(next.theme);
           }
+
+          void finishLayoutSliderChange(double _) =>
+              _endLayoutSliderChange();
 
           return SafeArea(
             child: SizedBox(
@@ -1910,6 +2257,10 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                       display: '${draft.fontSizePx}',
                       onChanged: (value) =>
                           update(draft.copyWith(fontSizePx: value.round())),
+                      onChangeStart: _isPdf
+                          ? null
+                          : (_) => _beginLayoutSliderChange(),
+                      onChangeEnd: _isPdf ? null : finishLayoutSliderChange,
                     ),
                     _ReaderSliderRow(
                       label: tr(locale, 'lineHeight'),
@@ -1920,6 +2271,24 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                       display: draft.lineHeight.toStringAsFixed(2),
                       onChanged: (value) =>
                           update(draft.copyWith(lineHeight: value)),
+                      onChangeStart: _isPdf
+                          ? null
+                          : (_) => _beginLayoutSliderChange(),
+                      onChangeEnd: _isPdf ? null : finishLayoutSliderChange,
+                    ),
+                    _ReaderSliderRow(
+                      label: tr(locale, 'margin'),
+                      value: draft.marginPx.toDouble(),
+                      min: 8,
+                      max: 96,
+                      divisions: 22,
+                      display: '${draft.marginPx} px',
+                      onChanged: (value) =>
+                          update(draft.copyWith(marginPx: value.round())),
+                      onChangeStart: _isPdf
+                          ? null
+                          : (_) => _beginLayoutSliderChange(),
+                      onChangeEnd: _isPdf ? null : finishLayoutSliderChange,
                     ),
                     _ReaderSliderRow(
                       label: tr(locale, 'brightness'),
@@ -2154,6 +2523,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
             onPointerUp: _onReaderPointerUp,
             onPointerCancel: (_) => _pointerDown = null,
             child: Stack(
+              key: _readerStackKey,
               fit: StackFit.expand,
               children: [
                 SelectableRegion(
@@ -2226,6 +2596,33 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     ReaderSettingsData settings,
     ReaderThemeColors colors,
   ) {
+    if (_layoutReflowPending) {
+      return Center(
+        child: CircularProgressIndicator(
+          color: colors.accent,
+          strokeWidth: 2.5,
+        ),
+      );
+    }
+    final layoutError = _layoutReflowError;
+    if (layoutError != null) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              '${tr(locale, 'errorPrefix')}: '
+              '${_displayError('$layoutError', locale)}',
+            ),
+            const SizedBox(height: 8),
+            FilledButton.tonal(
+              onPressed: _retryLayoutReflow,
+              child: Text(tr(locale, 'retry')),
+            ),
+          ],
+        ),
+      );
+    }
     if (_loading && _pages.isEmpty) {
       return Center(
         child: CircularProgressIndicator(
@@ -2483,6 +2880,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     final spans = _spansFor(
       textBlock,
       base,
+      sectionIndex: sectionIndex,
       highlights: highlights,
       engineChars: engineChars,
     );
@@ -2598,13 +2996,46 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     Color color,
   ) => ReaderPagination.styleForBlock(block, settings, color);
 
+  List<ReaderQuoteRange> _quoteRangesForSection(int sectionIndex) {
+    final cached = _quoteHighlightsBySection[sectionIndex];
+    if (cached != null) return cached;
+    final blocks = _blocksForSection(sectionIndex);
+    if (blocks == null) return const [];
+    final ranges = [
+      for (final quote in _quotes)
+        if (quote.sectionIndex == sectionIndex)
+          ?ReaderQuoteRangeResolver.resolve(quote, blocks),
+    ];
+    final resolved = List<ReaderQuoteRange>.unmodifiable(ranges);
+    _quoteHighlightsBySection[sectionIndex] = resolved;
+    return resolved;
+  }
+
   List<_PaintSpan> _spansFor(
     TextBlock block,
     TextStyle base, {
+    required int sectionIndex,
     List<HighlightRecord>? highlights,
     int? engineChars,
   }) {
-    final activeHighlights = highlights ?? _highlights;
+    final quoteColor = ReaderThemeColors.of(
+      ref.read(readerSettingsProvider).theme,
+    ).accent.toARGB32();
+    final activeHighlights = <HighlightRecord>[
+      ...(highlights ?? _highlights),
+      for (final range in _quoteRangesForSection(sectionIndex))
+          HighlightRecord(
+            bookId: widget.bookId,
+            sectionIndex: sectionIndex,
+            startOffset: range.start,
+            endOffset: range.end,
+            cfi: '',
+            color: quoteColor,
+            quotedText: '',
+            note: '',
+            offsetUnit: 'rust_scalar',
+          ),
+    ];
     final text = block.plainText;
     if (text.isEmpty || activeHighlights.isEmpty) {
       return [
@@ -2789,46 +3220,34 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                       icon: const Icon(Icons.text_fields_rounded),
                       onPressed: () => _showReaderSettings(locale),
                     ),
-                    IconButton(
-                      tooltip: tr(locale, 'addBookmark'),
-                      color: colors.text,
-                      icon: const Icon(Icons.bookmark_border_rounded),
-                      onPressed: _session == null ? null : _addBookmark,
+                    ValueListenableBuilder<int>(
+                      valueListenable: _continuousPageNotifier,
+                      builder: (context, _, _) => IconButton(
+                        tooltip: tr(locale, 'addBookmark'),
+                        color: _currentPageHasBookmark
+                            ? colors.accent
+                            : colors.text,
+                        icon: Icon(
+                          _currentPageHasBookmark
+                              ? Icons.bookmark_rounded
+                              : Icons.bookmark_border_rounded,
+                        ),
+                        onPressed: _session == null || _bookmarkSaving
+                            ? null
+                            : _toggleBookmark,
+                      ),
                     ),
-                    PopupMenuButton<String>(
-                      tooltip: tr(locale, 'more'),
-                      icon: Icon(Icons.more_horiz_rounded, color: colors.text),
-                      onSelected: (value) {
-                        if (value == 'chapters') {
-                          _openChapters();
-                        } else if (value == 'note') {
-                          _addNote();
-                        }
-                      },
-                      itemBuilder: (context) => [
-                        PopupMenuItem(
-                          value: 'chapters',
-                          enabled: _session != null,
-                          child: Row(
-                            children: [
-                              const Icon(Icons.menu_book_outlined),
-                              const SizedBox(width: 12),
-                              Text(tr(locale, 'chapters')),
-                            ],
-                          ),
-                        ),
-                        PopupMenuItem(
-                          value: 'note',
-                          enabled: _session != null,
-                          child: Row(
-                            children: [
-                              const Icon(Icons.edit_note_rounded),
-                              const SizedBox(width: 12),
-                              Text(tr(locale, 'addNote')),
-                            ],
-                          ),
-                        ),
-                      ],
+                    IconButton(
+                      tooltip: tr(locale, 'chapters'),
+                      color: colors.text,
+                      icon: const Icon(Icons.menu_book_outlined),
+                      onPressed: _session == null ? null : _openChapters,
+                    ),
+                    IconButton(
+                      tooltip: tr(locale, 'addNote'),
+                      color: colors.text,
+                      icon: const Icon(Icons.edit_note_rounded),
+                      onPressed: _session == null ? null : _addNote,
                     ),
                   ],
                 ),
@@ -3095,28 +3514,47 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   }
 
   Widget _positionedHighlightPanel(String locale, ReaderThemeColors colors) {
-    final size = MediaQuery.sizeOf(context);
-    final safe = MediaQuery.paddingOf(context);
-    final width = math.min(380.0, size.width - 24).toDouble();
+    final screenSize = MediaQuery.sizeOf(context);
+    final safePadding = MediaQuery.paddingOf(context);
+    final stackObject = _readerStackKey.currentContext?.findRenderObject();
+    final stackBox = stackObject is RenderBox ? stackObject : null;
+    final size = stackBox?.size ?? screenSize;
+    final globalSafeBounds = Rect.fromLTRB(
+      safePadding.left,
+      safePadding.top,
+      screenSize.width - safePadding.right,
+      screenSize.height - safePadding.bottom,
+    );
+    final safeBounds = stackBox == null
+        ? globalSafeBounds
+        : Rect.fromPoints(
+            stackBox.globalToLocal(globalSafeBounds.topLeft),
+            stackBox.globalToLocal(globalSafeBounds.bottomRight),
+          ).intersect(Offset.zero & size);
+    final width = math
+        .min(380.0, math.max(1.0, safeBounds.width - 24))
+        .toDouble();
     const panelHeight = 190.0;
     final anchor =
         _selectionAnchor ?? Offset(size.width / 2, size.height * .55);
-    final minTop = safe.top + 88;
-    final maxTop = math.max(
-      minTop,
-      size.height - safe.bottom - panelHeight - 12,
+    final selectionRects = <Rect>[
+      for (final rect in _selectedBlockRects.values.expand((items) => items))
+        if (stackBox != null)
+          Rect.fromPoints(
+            stackBox.globalToLocal(rect.topLeft),
+            stackBox.globalToLocal(rect.bottomRight),
+          ),
+    ];
+    final placement = placeSelectionPopup(
+      viewportSize: size,
+      safeBounds: safeBounds,
+      selectionRects: selectionRects,
+      fallbackAnchor: anchor,
+      popupSize: Size(width, panelHeight),
     );
-    final above = anchor.dy - panelHeight - 16;
-    final below = anchor.dy + 18;
-    final top = (above >= minTop ? above : below)
-        .clamp(minTop, maxTop)
-        .toDouble();
-    final left = (anchor.dx - width / 2)
-        .clamp(12.0, size.width - width - 12)
-        .toDouble();
     return Positioned(
-      left: left,
-      top: top,
+      left: placement.left,
+      top: placement.top,
       width: width,
       child: _highlightBar(locale, colors),
     );
@@ -3221,6 +3659,8 @@ class _ReaderSliderRow extends StatelessWidget {
     required this.divisions,
     required this.display,
     required this.onChanged,
+    this.onChangeStart,
+    this.onChangeEnd,
   });
 
   final String label;
@@ -3230,6 +3670,8 @@ class _ReaderSliderRow extends StatelessWidget {
   final int divisions;
   final String display;
   final ValueChanged<double> onChanged;
+  final ValueChanged<double>? onChangeStart;
+  final ValueChanged<double>? onChangeEnd;
 
   @override
   Widget build(BuildContext context) {
@@ -3247,6 +3689,8 @@ class _ReaderSliderRow extends StatelessWidget {
           min: min,
           max: max,
           divisions: divisions,
+          onChangeStart: onChangeStart,
+          onChangeEnd: onChangeEnd,
           onChanged: onChanged,
         ),
       ],
@@ -3277,6 +3721,7 @@ class _ReaderSelectableBlock extends StatefulWidget {
     int sectionIndex,
     TextBlock block,
     SelectedContentRange? range,
+    List<Rect> selectionRects,
   )
   onRangeChanged;
   final Widget child;
@@ -3287,6 +3732,7 @@ class _ReaderSelectableBlock extends StatefulWidget {
 
 class _ReaderSelectableBlockState extends State<_ReaderSelectableBlock> {
   final SelectionListenerNotifier _notifier = SelectionListenerNotifier();
+  final GlobalKey _paragraphKey = GlobalKey();
 
   @override
   void initState() {
@@ -3297,11 +3743,23 @@ class _ReaderSelectableBlockState extends State<_ReaderSelectableBlock> {
   void _selectionChanged() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_notifier.registered) return;
+      final range = _notifier.selection.range;
+      final renderObject = _paragraphKey.currentContext?.findRenderObject();
+      final rects = range == null
+          ? const <Rect>[]
+          : globalTextSelectionRects(
+              renderObject,
+              TextSelection(
+                baseOffset: range.startOffset,
+                extentOffset: range.endOffset,
+              ),
+            );
       widget.onRangeChanged(
         widget.blockKey,
         widget.sectionIndex,
         widget.block,
-        _notifier.selection.range,
+        range,
+        rects,
       );
     });
   }
@@ -3314,8 +3772,10 @@ class _ReaderSelectableBlockState extends State<_ReaderSelectableBlock> {
   }
 
   @override
-  Widget build(BuildContext context) =>
-      SelectionListener(selectionNotifier: _notifier, child: widget.child);
+  Widget build(BuildContext context) => SelectionListener(
+    selectionNotifier: _notifier,
+    child: KeyedSubtree(key: _paragraphKey, child: widget.child),
+  );
 }
 
 class _SelectionStatusObserver extends StatefulWidget {

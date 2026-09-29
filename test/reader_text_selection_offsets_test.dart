@@ -119,6 +119,54 @@ void main() {
     );
   });
 
+  test(
+    'consumes discarded entity-only blocks before the next rendered block',
+    () {
+      const html =
+          '<p>Kabala</p>'
+          '<div><b>&#160;</b></div>'
+          '<div><b>&#160;</b></div>'
+          '<div><b>&#160;</b></div>'
+          '<div><b>&#160;</b></div>'
+          '<p><b> A. Ekrem Ülkü</b></p>';
+      const source = 'Kabala &#160; &#160; &#160; &#160; A. Ekrem Ülkü';
+
+      // Normal Reader parsing continues to discard whitespace-only blocks.
+      expect(
+        parseSectionHtml(html)
+            .whereType<TextBlock>()
+            .where((block) => block.isEmpty),
+        isEmpty,
+      );
+
+      // The alignment path temporarily retains those blocks to consume their
+      // literal Rust entity spans, then removes them from rendered output.
+      final blocks = ReaderTextSelectionOffsets.alignBlocks(
+        parseSectionHtml(html, preserveEmptyTextBlocks: true),
+        source,
+        sourceHtml: html,
+      ).whereType<TextBlock>().toList();
+
+      expect(blocks, hasLength(2));
+      expect(blocks.map((block) => block.plainText), [
+        'Kabala',
+        ' A. Ekrem Ülkü',
+      ]);
+      expect(ReaderTextSelectionOffsets.sourceRangeFor(blocks[1], 1, 2), (
+        35,
+        36,
+      ));
+      expect(ReaderTextSelectionOffsets.sourceRangeFor(blocks[1], 1, 14), (
+        35,
+        48,
+      ));
+      expect(
+        ReaderTextSelectionOffsets.renderedTextForRange(blocks, 35, 48),
+        'A. Ekrem Ülkü',
+      );
+    },
+  );
+
   test('maps nbsp, decimal and hexadecimal entities independently', () {
     const html = '<p>&copy;&nbsp;&#169;&#xA9;</p>';
     const rustText = '&copy;&nbsp;&#169;&#xA9;';
@@ -133,6 +181,41 @@ void main() {
       ReaderTextSelectionOffsets.renderedTextForRange([block], 6, 12),
       ' ',
     );
+  });
+
+  test('skips source-only whitespace entities before the next visible block', () {
+    const html = '<p>Visible</p><span>&nbsp;</span><h1>Next</h1>';
+    const source = 'Visible &nbsp; Next';
+
+    final blocks = ReaderTextSelectionOffsets.alignBlocks(
+      parseSectionHtml(html),
+      source,
+      sourceHtml: html,
+    ).whereType<TextBlock>().toList();
+
+    expect(blocks.map((block) => block.plainText), ['Visible', 'Next']);
+    expect(ReaderTextSelectionOffsets.sourceRangeFor(blocks[1], 0, 1), (15, 16));
+  });
+
+  test('consumes whitespace-only blocks for common NBSP entity spellings', () {
+    for (final entity in ['&#160;', '&nbsp;', '&#xA0;']) {
+      final html =
+          '<p>Visible</p><div><b>$entity</b></div><h1>Next</h1>';
+      final source = 'Visible $entity Next';
+      final blocks = ReaderTextSelectionOffsets.alignBlocks(
+        parseSectionHtml(html, preserveEmptyTextBlocks: true),
+        source,
+        sourceHtml: html,
+      ).whereType<TextBlock>().toList();
+      final nextStart = source.substring(0, source.indexOf('Next')).runes.length;
+
+      expect(blocks.map((block) => block.plainText), ['Visible', 'Next']);
+      expect(
+        ReaderTextSelectionOffsets.sourceRangeFor(blocks[1], 0, 1),
+        (nextStart, nextStart + 1),
+        reason: entity,
+      );
+    }
   });
 
   test('maps a numeric astral entity to one Rust scalar and two UTF-16 units', () {

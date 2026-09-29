@@ -7,6 +7,7 @@ import 'package:codar/src/l10n/strings.dart';
 import 'package:codar/src/library/book_id.dart';
 import 'package:codar/src/library/backup_service.dart';
 import 'package:codar/src/library/enrichment_service.dart';
+import 'package:codar/src/library/metadata_match.dart';
 import 'package:codar/src/presentation/book_detail/book_detail_screen.dart';
 import 'package:codar/src/reader/locator_nav.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -96,6 +97,70 @@ void main() {
     expect(stableBookId(const [1, 2, 3, 4]), first);
     expect(stableBookId(const [1, 2, 3, 5]), isNot(first));
     expect(first, startsWith('b_'));
+  });
+
+  test(
+    'filename metadata can be corrected only with title and author evidence',
+    () {
+      expect(
+        normalizeBookMetadataText('Olasılıksız Adem Faber (1).epub'),
+        'olasiliksiz adem faber',
+      );
+      expect(
+        isConfidentBookMetadataMatch(
+          queryTitle: 'Olasılıksız Adem Faber (1).epub',
+          resultTitle: 'Olasılıksız',
+          queryAuthor: 'Adem Faber',
+          resultAuthor: 'Adam Fawer',
+          isbnMatched: false,
+        ),
+        isTrue,
+      );
+      expect(
+        isConfidentBookMetadataMatch(
+          queryTitle: 'Olasılıksız',
+          resultTitle: 'Unrelated title',
+          queryAuthor: 'Adam Fawer',
+          resultAuthor: 'Adam Fawer',
+          isbnMatched: false,
+        ),
+        isFalse,
+      );
+      expect(
+        isConfidentBookMetadataMatch(
+          queryTitle: 'ISBN lookup failed',
+          resultTitle: 'Canonical title',
+          queryAuthor: '',
+          resultAuthor: '',
+          isbnMatched: true,
+        ),
+        isTrue,
+      );
+    },
+  );
+
+  test('metadata matching rejects a shorter title for a different same-author book', () {
+    expect(bookMetadataTextSimilarity('Dune Messiah', 'Dune'), lessThan(0.90));
+    expect(
+      isConfidentBookMetadataMatch(
+        queryTitle: 'Dune Messiah',
+        resultTitle: 'Dune',
+        queryAuthor: 'Frank Herbert',
+        resultAuthor: 'Frank Herbert',
+        isbnMatched: false,
+      ),
+      isFalse,
+    );
+    expect(
+      isConfidentBookMetadataMatch(
+        queryTitle: 'Dune Messiah',
+        resultTitle: 'Dune',
+        queryAuthor: '',
+        resultAuthor: '',
+        isbnMatched: false,
+      ),
+      isFalse,
+    );
   });
 
   test('grid columns adapt to width', () {

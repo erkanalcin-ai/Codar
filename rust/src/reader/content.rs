@@ -509,6 +509,26 @@ mod tests {
                 "&nbsp;&#169;&#xA9;",
             ),
             (
+                "<p>Kabala</p><div><b>&#160;</b></div><div><b>&#160;</b></div><div><b>&#160;</b></div><div><b>&#160;</b></div><p><b> A. Ekrem Ülkü</b></p>",
+                "Kabala &#160; &#160; &#160; &#160; A. Ekrem Ülkü",
+            ),
+            (
+                "<p>Visible</p><div><b>&#160;</b></div><h1>Next</h1>",
+                "Visible &#160; Next",
+            ),
+            (
+                "<p>Visible</p><div><b>&#xA0;</b></div><h1>Next</h1>",
+                "Visible &#xA0; Next",
+            ),
+            (
+                "<p>Visible</p><div><b>&nbsp;</b></div><h1>Next</h1>",
+                "Visible &nbsp; Next",
+            ),
+            (
+                "<p>Visible</p><span>&nbsp;</span><h1>Next</h1>",
+                "Visible &nbsp; Next",
+            ),
+            (
                 "<p>foo<em>bar</em>baz</p>",
                 "foo bar baz",
             ),

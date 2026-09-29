@@ -27,7 +27,11 @@ void main() {
   });
 
   test('CodarLibFile carries MediaStore identity', () {
-    final f = CodarLibFile(name: 'a.epub', uri: 'content://media/1');
+    final f = CodarLibFile(
+      name: 'a.epub',
+      uri: 'content://media/1',
+      size: 1,
+    );
     expect(f.name, 'a.epub');
     expect(f.uri, startsWith('content://'));
   });

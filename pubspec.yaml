@@ -3,7 +3,7 @@ description: "Local-first Flutter and Rust ebook reader for Codar."
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 
 # Android versionName/versionCode and iOS build name/number come from this value.
-version: 1.6.0+44
+version: 1.7.2+47
 
 environment:
   sdk: ^3.13.1

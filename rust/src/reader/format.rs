@@ -107,10 +107,13 @@ pub fn open_pdf_lazy(
         ));
     }
 
-    let title = title_fallback(path);
+    let title = pdf_info_text(&document, "Title")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| title_fallback(path));
+    let author = pdf_info_text(&document, "Author").filter(|value| !value.trim().is_empty());
     let metadata = ebook_rs::Metadata {
         title,
-        creators: vec!["PDF Document".to_string()],
+        creators: author.into_iter().collect(),
         languages: vec!["en".to_string()],
         description: Some(format!("PDF Document ({page_count} pages)")),
         subjects: vec!["PDF".to_string()],
@@ -195,4 +198,104 @@ fn title_fallback(path: &Path) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("Untitled")
         .to_string()
+}
+
+fn pdf_info_text(document: &pdf_oxide::PdfDocument, key: &str) -> Option<String> {
+    let info = document.trailer().as_dict()?.get("Info")?;
+    let info_object = match info {
+        pdf_oxide::object::Object::Reference(reference) => document.load_object(*reference).ok()?,
+        direct => direct.clone(),
+    };
+    let bytes = info_object.as_dict()?.get(key)?.as_string()?;
+    decode_pdf_text(bytes)
+}
+
+fn decode_pdf_text(bytes: &[u8]) -> Option<String> {
+    let decoded = if bytes.starts_with(&[0xFE, 0xFF]) {
+        let units = bytes[2..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        String::from_utf16(&units).ok()?
+    } else if bytes.starts_with(&[0xFF, 0xFE]) {
+        let units = bytes[2..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        String::from_utf16(&units).ok()?
+    } else {
+        bytes.iter().map(|byte| decode_pdfdoc_byte(*byte)).collect()
+    };
+    let decoded = decoded.trim_matches('\0').trim().to_string();
+    (!decoded.is_empty()).then_some(decoded)
+}
+
+fn decode_pdfdoc_byte(byte: u8) -> char {
+    match byte {
+        0x18 => '\u{02D8}',               // BREVE
+        0x19 => '\u{02C7}',               // CARON
+        0x1A => '\u{02C6}',               // MODIFIER LETTER CIRCUMFLEX ACCENT
+        0x1B => '\u{02D9}',               // DOT ABOVE
+        0x1C => '\u{02DD}',               // DOUBLE ACUTE ACCENT
+        0x1D => '\u{02DB}',               // OGONEK
+        0x1E => '\u{02DA}',               // RING ABOVE
+        0x1F => '\u{02DC}',               // SMALL TILDE
+        0x7F | 0x9F | 0xAD => '\u{FFFD}', // Undefined in PDFDocEncoding.
+        0x80 => '\u{2022}',               // BULLET
+        0x81 => '\u{2020}',               // DAGGER
+        0x82 => '\u{2021}',               // DOUBLE DAGGER
+        0x83 => '\u{2026}',               // HORIZONTAL ELLIPSIS
+        0x84 => '\u{2014}',               // EM DASH
+        0x85 => '\u{2013}',               // EN DASH
+        0x86 => '\u{0192}',               // LATIN SMALL LETTER F WITH HOOK
+        0x87 => '\u{2044}',               // FRACTION SLASH
+        0x88 => '\u{2039}',               // SINGLE LEFT-POINTING ANGLE QUOTATION MARK
+        0x89 => '\u{203A}',               // SINGLE RIGHT-POINTING ANGLE QUOTATION MARK
+        0x8A => '\u{2212}',               // MINUS SIGN
+        0x8B => '\u{2030}',               // PER MILLE SIGN
+        0x8C => '\u{201E}',               // DOUBLE LOW-9 QUOTATION MARK
+        0x8D => '\u{201C}',               // LEFT DOUBLE QUOTATION MARK
+        0x8E => '\u{201D}',               // RIGHT DOUBLE QUOTATION MARK
+        0x8F => '\u{2018}',               // LEFT SINGLE QUOTATION MARK
+        0x90 => '\u{2019}',               // RIGHT SINGLE QUOTATION MARK
+        0x91 => '\u{201A}',               // SINGLE LOW-9 QUOTATION MARK
+        0x92 => '\u{2122}',               // TRADE MARK SIGN
+        0x93 => '\u{FB01}',               // LATIN SMALL LIGATURE FI
+        0x94 => '\u{FB02}',               // LATIN SMALL LIGATURE FL
+        0x95 => '\u{0141}',               // LATIN CAPITAL LETTER L WITH STROKE
+        0x96 => '\u{0152}',               // LATIN CAPITAL LIGATURE OE
+        0x97 => '\u{0160}',               // LATIN CAPITAL LETTER S WITH CARON
+        0x98 => '\u{0178}',               // LATIN CAPITAL LETTER Y WITH DIAERESIS
+        0x99 => '\u{017D}',               // LATIN CAPITAL LETTER Z WITH CARON
+        0x9A => '\u{0131}',               // LATIN SMALL LETTER DOTLESS I
+        0x9B => '\u{0142}',               // LATIN SMALL LETTER L WITH STROKE
+        0x9C => '\u{0153}',               // LATIN SMALL LIGATURE OE
+        0x9D => '\u{0161}',               // LATIN SMALL LETTER S WITH CARON
+        0x9E => '\u{017E}',               // LATIN SMALL LETTER Z WITH CARON
+        0xA0 => '\u{20AC}',               // EURO SIGN
+        _ => char::from(byte),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_pdf_text;
+
+    #[test]
+    fn decodes_pdf_info_utf16_and_latin_text() {
+        assert_eq!(
+            decode_pdf_text(&[0xFE, 0xFF, 0x00, b'C', 0x00, 0x6F]),
+            Some("Co".into())
+        );
+        assert_eq!(decode_pdf_text(&[b'K', 0xFC, b'r']), Some("Kür".into()));
+        assert_eq!(decode_pdf_text(&[b' ', b' ', 0]), None);
+    }
+
+    #[test]
+    fn decodes_pdfdoc_encoding_special_and_undefined_bytes() {
+        assert_eq!(decode_pdf_text(&[0x80]), Some("•".into()));
+        assert_eq!(decode_pdf_text(&[0xA0]), Some("€".into()));
+        assert_eq!(decode_pdf_text(&[0x85]), Some("–".into()));
+        assert_eq!(decode_pdf_text(&[0x7F]), Some("�".into()));
+    }
 }

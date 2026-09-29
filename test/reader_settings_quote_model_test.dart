@@ -17,6 +17,24 @@ void main() {
     expect(settings.toMap()['brightness'], .37);
   });
 
+  test('reader margin defaults for old settings and persists', () {
+    final oldSettings = ReaderSettingsData.fromMap({
+      'font_family': 'System',
+      'font_size_px': 18,
+      'line_height': 1.5,
+      'alignment': 'start',
+      'theme': 'light',
+    });
+    final updated = ReaderSettingsData.fromMap({
+      ...oldSettings.toMap(),
+      'margin_px': 72,
+    });
+
+    expect(oldSettings.marginPx, 48);
+    expect(updated.marginPx, 72);
+    expect(updated.toMap()['margin_px'], 72);
+  });
+
   test('quote model preserves long text without an application cap', () {
     final text = List.filled(240, 'Uzun alıntı').join(' ');
     final quote = QuoteRecord.fromMap({

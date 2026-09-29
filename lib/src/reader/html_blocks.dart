@@ -105,6 +105,7 @@ const _dropEntirely = {'script', 'style', 'head', 'noscript', 'template'};
 List<ReaderBlock> parseSectionHtml(
   String html, {
   List<ReaderImage> images = const [],
+  bool preserveEmptyTextBlocks = false,
 }) {
   final blocks = <ReaderBlock>[];
   final imageBySource = {for (final image in images) image.source: image};
@@ -137,7 +138,7 @@ List<ReaderBlock> parseSectionHtml(
     final kind = blockKind;
     if (kind != null) {
       final block = TextBlock(kind: kind, parts: parts);
-      if (!block.isEmpty) blocks.add(block);
+      if (!block.isEmpty || preserveEmptyTextBlocks) blocks.add(block);
     }
     parts = <SpanPart>[];
     blockKind = null;

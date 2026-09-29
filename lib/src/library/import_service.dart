@@ -213,7 +213,22 @@ class ImportService {
 
     final sourceIsCodarLib =
         Platform.isAndroid && await storage.isCodarLibRoot(selected);
-    final candidates = await _folderCandidates(selected);
+    // For the app-managed root, enumerate CodarLib through its authoritative
+    // storage listing. SAF child URIs are transient provider handles; storing
+    // them as book_files would make later open/delete depend on the tree grant.
+    final candidates = sourceIsCodarLib
+        ? (await storage.listCodarLib())
+              .map(
+                (file) => _FolderCandidate(
+                  displayName: file.name,
+                  size: file.size,
+                  sourceUri: file.uri,
+                  readBytes: () =>
+                      storage.readFile(file.uri, maxBytes: maxImportBytes),
+                ),
+              )
+              .toList()
+        : await _folderCandidates(selected);
     var imported = 0;
     var duplicates = 0;
     var skippedUnsupported = 0;
@@ -330,10 +345,8 @@ class ImportService {
                 displayName: file.name,
                 size: file.size,
                 sourceUri: file.uri,
-                readBytes: () => storage.readFile(
-                  file.uri,
-                  maxBytes: maxImportBytes,
-                ),
+                readBytes: () =>
+                    storage.readFile(file.uri, maxBytes: maxImportBytes),
               ),
             )
             .toList();
@@ -437,6 +450,7 @@ class ImportService {
     int? sourceSize,
     bool removeSource = true,
     bool sourceIsCodarLib = false,
+    bool repairManagedCopyOnDuplicate = false,
   }) async {
     final next = _tail.then(
       (_) => _importBytesInner(
@@ -447,6 +461,7 @@ class ImportService {
         sourceSize: sourceSize,
         removeSource: removeSource,
         sourceIsCodarLib: sourceIsCodarLib,
+        repairManagedCopyOnDuplicate: repairManagedCopyOnDuplicate,
       ),
     );
     _tail = next.then((_) {}, onError: (_) {});
@@ -505,6 +520,7 @@ class ImportService {
         validationPath: validation.path,
         sourceSize: actualSize,
         removeSource: false,
+        repairManagedCopyOnDuplicate: true,
       );
     } finally {
       try {
@@ -521,6 +537,7 @@ class ImportService {
     int? sourceSize,
     bool removeSource = true,
     bool sourceIsCodarLib = false,
+    bool repairManagedCopyOnDuplicate = false,
   }) async {
     final ext = _extension(displayName);
     final mime = _allowedExtensions[ext];
@@ -548,7 +565,8 @@ class ImportService {
     final ownsProbe = validationPath == null;
     late final String bookId;
     late String title;
-    late final String author;
+    late String author;
+    late String titleSource;
     late final String language;
     late final String format;
     late final int sectionCount;
@@ -558,13 +576,22 @@ class ImportService {
       if (!await probe.exists()) throw ImportException('source-unavailable');
       await reader.withBook(probe.path, (s) async {
         final info = await reader.getDocumentInfo(s);
-        title = _clean(info.title);
+        final engineTitle = _clean(info.title);
+        final sourceTitle = _titleFromSourceName(displayName);
+        final useSourceName =
+            engineTitle.isEmpty ||
+            _isTemporaryStagingTitle(engineTitle) ||
+            _normalizeTitle(engineTitle) == _normalizeTitle(sourceTitle);
+        title = useSourceName ? sourceTitle : engineTitle;
+        titleSource = useSourceName ? 'filename' : 'embedded';
         author = _clean(info.authors.join(', '));
+        if (ext == 'pdf' && author.toLowerCase() == 'pdf document') {
+          author = '';
+        }
         language = info.language ?? '';
         format = info.format;
         sectionCount = info.sectionCount.toInt();
         fingerprint = info.fingerprint;
-        if (title.isEmpty) title = p.basenameWithoutExtension(displayName);
         bookId = bytes.isEmpty && validationPath != null
             ? await stableBookIdFromFile(probe)
             : stableBookId(bytes);
@@ -580,6 +607,22 @@ class ImportService {
         await books.findByFingerprint(fingerprint);
     if (existing != null) {
       final existingFile = await books.getFile(existing.bookId, 'original');
+      var existingTitle = existing.title;
+      var managedFileReattached = false;
+      final existingMetadata = await books.getMetadata(existing.bookId);
+      if (existingMetadata['user_edited'] != '1' &&
+          _isTemporaryStagingTitle(existing.title)) {
+        existingTitle = _titleFromSourceName(
+          existingFile?.displayName.isNotEmpty == true
+              ? existingFile!.displayName
+              : displayName,
+        );
+        await books.updateMachineDerivedBookFields(
+          existing.bookId,
+          title: existingTitle,
+          titleSource: 'filename',
+        );
+      }
       if (existingFile == null || existingFile.mediastoreUri.isEmpty) {
         // A JSON backup can preserve the book and its annotations without a
         // physical file. Reattach that file in place instead of creating a
@@ -613,17 +656,72 @@ class ImportService {
             : false;
         return ImportResult(
           bookId: existing.bookId,
-          title: existing.title,
+          title: existingTitle,
           isNew: false,
           sourceRetained: sourceRetained,
           fileReattached: true,
         );
       }
+      if (sourceIsCodarLib &&
+          sourceUri != null &&
+          sourceUri.isNotEmpty &&
+          existingFile.mediastoreUri != sourceUri) {
+        // The content was read and fingerprinted from this exact, verified
+        // CodarLib entry. Rebind the existing book row to its canonical
+        // app-managed URI without copying or changing the book ID/user data.
+        await books.upsertFile(
+          bookId: existing.bookId,
+          kind: 'original',
+          displayName: displayName,
+          mime: mime,
+          mediastoreUri: sourceUri,
+          cachePath: '',
+          size: fileSize,
+        );
+        managedFileReattached = true;
+      }
+      if (repairManagedCopyOnDuplicate && !sourceIsCodarLib) {
+        final state = await storage.managedFileState(
+          existingFile.mediastoreUri,
+        );
+        if (state == ManagedFileState.managedMissing ||
+            state == ManagedFileState.external) {
+          final uri = await _storeImportedFile(
+            displayName: displayName,
+            bytes: bytes,
+            mime: mime,
+            sourceUri: sourceUri,
+            size: fileSize,
+          );
+          try {
+            await books.upsertFile(
+              bookId: existing.bookId,
+              kind: 'original',
+              displayName: displayName,
+              mime: mime,
+              mediastoreUri: uri,
+              cachePath: '',
+              size: fileSize,
+            );
+          } catch (_) {
+            await _discardUnregisteredCopy(uri);
+            rethrow;
+          }
+          await books.touchOpened(existing.bookId);
+          return ImportResult(
+            bookId: existing.bookId,
+            title: existingTitle,
+            isNew: false,
+            fileReattached: true,
+          );
+        }
+      }
       await books.touchOpened(existing.bookId);
       return ImportResult(
         bookId: existing.bookId,
-        title: existing.title,
+        title: existingTitle,
         isNew: false,
+        fileReattached: managedFileReattached,
       );
     }
 
@@ -651,6 +749,7 @@ class ImportService {
         displayName: displayName,
         mime: mime,
         mediastoreUri: uri,
+        titleSource: titleSource,
       );
     } catch (_) {
       if (!sourceIsCodarLib) await _discardUnregisteredCopy(uri);
@@ -779,6 +878,24 @@ class ImportService {
   }
 
   static String _clean(String s) => s.replaceAll(RegExp(r'\s+'), ' ').trim();
+
+  static bool _isTemporaryStagingTitle(String title) => RegExp(
+    r'^codar_(?:probe|external|folder_pdf)_\d+$',
+    caseSensitive: false,
+  ).hasMatch(title.trim());
+
+  static String _titleFromSourceName(String name) {
+    var title = p.basenameWithoutExtension(name).trim();
+    title = title.replaceFirst(
+      RegExp(r'\s*(?:\(\s*\d+\s*\)|copy|kopya)\s*$', caseSensitive: false),
+      '',
+    );
+    if (_isTemporaryStagingTitle(title)) return 'Untitled book';
+    return title.isEmpty ? 'Untitled book' : title;
+  }
+
+  static String _normalizeTitle(String title) =>
+      _clean(_titleFromSourceName(title)).toLowerCase();
 
   static String _extension(String name) =>
       p.extension(name).replaceFirst('.', '').toLowerCase();

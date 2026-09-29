@@ -1,16 +1,17 @@
 // Silent reconciliation of externally deleted Downloads/CodarLib/ files.
 //
-// If the user (or another app/cleanup tool) deletes a book file outside
-// Codar, the MediaStore entry disappears. Keeping a dead DB row would show
-// a ghost book that can never open, so on launch the library diffs the
-// stored MediaStore URIs against the live listing and purges orphaned
-// rows — silently, without dialogs. Annotations die with the book via
-// ON DELETE CASCADE; the app-private staged copy and cover are removed
-// too. Nothing is ever written to CodarLib (books only, no sidecars).
+// Reconciliation removes a row only after the stored URI is confirmed to be
+// a missing file under Codar's managed root. SAF and MediaStore can expose
+// different URIs for one physical file; external or uncertain URIs are kept.
 
 import 'package:codar/src/db/repositories.dart';
 import 'package:codar/src/library/import_service.dart';
 import 'package:codar/src/storage/codar_lib.dart';
+
+bool shouldPurgeReconciledFile({
+  required bool uriListed,
+  required ManagedFileState state,
+}) => !uriListed && state == ManagedFileState.managedMissing;
 
 /// Returns the number of orphaned books purged.
 Future<int> reconcileExternalDeletions({
@@ -33,7 +34,12 @@ Future<int> reconcileExternalDeletions({
     final file = await books.getFile(b.bookId, 'original');
     final uri = file?.mediastoreUri ?? '';
     if (uri.isEmpty) continue;
-    if (!liveUris.contains(uri)) {
+    final uriListed = liveUris.contains(uri);
+    if (!uriListed &&
+        shouldPurgeReconciledFile(
+          uriListed: false,
+          state: await storage.managedFileState(uri),
+        )) {
       try {
         await import.deleteBook(b.bookId, deleteFile: false);
         purged++;

@@ -4,9 +4,10 @@
 import 'package:flutter/services.dart';
 
 class CodarLibFile {
-  CodarLibFile({required this.name, required this.uri});
+  CodarLibFile({required this.name, required this.uri, required this.size});
   final String name;
   final String uri;
+  final int size;
 }
 
 class CodarTreeFile {
@@ -24,6 +25,15 @@ class CodarTreeFile {
   final String uri;
   final int size;
 }
+
+enum ManagedFileState { managedPresent, managedMissing, external, unknown }
+
+ManagedFileState managedFileStateFromValue(Object? value) => switch (value) {
+  'managed_present' => ManagedFileState.managedPresent,
+  'managed_missing' => ManagedFileState.managedMissing,
+  'external' => ManagedFileState.external,
+  _ => ManagedFileState.unknown,
+};
 
 class CodarLibStorage {
   static const MethodChannel _ch = MethodChannel('codar/storage');
@@ -106,7 +116,11 @@ class CodarLibStorage {
         .cast<Map<dynamic, dynamic>>()
         .map(
           (m) =>
-              CodarLibFile(name: m['name'] as String, uri: m['uri'] as String),
+              CodarLibFile(
+                name: m['name'] as String,
+                uri: m['uri'] as String,
+                size: (m['size'] as num?)?.toInt() ?? -1,
+              ),
         )
         .toList();
   }
@@ -136,6 +150,21 @@ class CodarLibStorage {
     } on MissingPluginException {
       // Non-Android builds do not expose Android's managed storage root.
       return false;
+    }
+  }
+
+  /// Identifies whether a stored URI still names a file in Codar's managed
+  /// library. Unknown results must never be treated as a confirmed deletion.
+  Future<ManagedFileState> managedFileState(String uri) async {
+    try {
+      final value = await _ch.invokeMethod<String>('managedFileState', {
+        'uri': uri,
+      });
+      return managedFileStateFromValue(value);
+    } on PlatformException {
+      return ManagedFileState.unknown;
+    } on MissingPluginException {
+      return ManagedFileState.unknown;
     }
   }
 

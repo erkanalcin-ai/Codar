@@ -13,6 +13,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:codar/src/db/repositories.dart';
+import 'package:codar/src/library/metadata_match.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -36,12 +37,23 @@ class EnrichmentService {
     if (book == null) return EnrichResult(enriched: false);
     final meta = await books.getMetadata(bookId);
     if (!onlineAllowed) return EnrichResult(enriched: false);
+    final sourceFile = await books.getFile(bookId, 'original');
+    final titleNeedsVerification =
+        meta['user_edited'] != '1' &&
+        _isFilenameDerivedTitle(
+          book.title,
+          sourceFile?.displayName ?? '',
+          meta,
+        );
+    final sourceTitle = titleNeedsVerification
+        ? _metadataQueryTitle(book.title, sourceFile?.displayName ?? '')
+        : book.title;
     final cachedPath = await books.coverPath(bookId);
     final hasCachedCover =
         cachedPath != null && await File(cachedPath).exists();
     final cachedMetadata =
         meta['enrich_source'] == 'openlibrary' && meta['enrich_at'] != null;
-    if (cachedMetadata && hasCachedCover) {
+    if (cachedMetadata && hasCachedCover && !titleNeedsVerification) {
       return EnrichResult(enriched: false);
     }
     // A failed/no-cover lookup is also cached for a day. This keeps a grid of
@@ -54,23 +66,41 @@ class EnrichmentService {
     await books.setMetadata(bookId, 'cover_attempt_at', '$now');
     try {
       final hit = await _search(
-        book.title,
+        sourceTitle,
         book.author,
         isbn: meta['isbn'] ?? '',
       ).timeout(const Duration(seconds: 12));
       if (hit == null) return EnrichResult(enriched: false);
+      // Search results can contain plausible-looking ISBNs, descriptions and
+      // covers even when their title/author evidence does not identify this
+      // book. Keep all candidate metadata behind the same confidence gate.
+      if (!hit.confidentMatch) return EnrichResult(enriched: false);
       final updated = <String>[];
       final userEdited = meta['user_edited'] == '1';
       if (!userEdited) {
-        if (book.title.isEmpty && hit.title.isNotEmpty) {
-          await books.updateBookFields(bookId, title: hit.title);
-          // updateBookFields stamps user_edited; this one is machine-made.
-          await books.setMetadata(bookId, 'user_edited', '0');
+        final shouldUpdateTitle =
+            hit.confidentMatch &&
+            hit.title.isNotEmpty &&
+            (titleNeedsVerification || book.title.isEmpty);
+        final nextTitle = shouldUpdateTitle ? hit.title : book.title;
+        final nextAuthor =
+            hit.confidentMatch && book.author.isEmpty && hit.author.isNotEmpty
+            ? hit.author
+            : null;
+        if (nextTitle != book.title || nextAuthor != null) {
+          await books.updateMachineDerivedBookFields(
+            bookId,
+            title: nextTitle,
+            author: nextAuthor,
+            titleSource: shouldUpdateTitle
+                ? 'openlibrary'
+                : (meta['title_source'] ?? 'embedded'),
+          );
+        }
+        if (shouldUpdateTitle) {
           updated.add('title');
         }
-        if (book.author.isEmpty && hit.author.isNotEmpty) {
-          await books.updateBookFields(bookId, author: hit.author);
-          await books.setMetadata(bookId, 'user_edited', '0');
+        if (nextAuthor != null) {
           updated.add('author');
         }
       }
@@ -130,13 +160,71 @@ class EnrichmentService {
       if (isbn.trim().isEmpty && title.trim().isNotEmpty) 'title': title.trim(),
       if (isbn.trim().isEmpty && author.trim().isNotEmpty)
         'author': author.trim(),
-      'limit': '1',
+      'limit': '8',
     };
     final uri = Uri.https('openlibrary.org', '/search.json', q);
     final doc = await _getJson(uri);
     final docs = (doc?['docs'] as List?) ?? const [];
     if (docs.isEmpty) return null;
-    final d = docs.first as Map<String, dynamic>;
+    final ranked = <({Map<String, dynamic> doc, double score, bool isbn})>[];
+    for (final value in docs) {
+      if (value is! Map<String, dynamic>) continue;
+      final candidateTitle = (value['title'] as String?) ?? '';
+      final candidateAuthors = (value['author_name'] as List?) ?? const [];
+      final candidateAuthor = candidateAuthors.isEmpty
+          ? ''
+          : candidateAuthors.first.toString();
+      final candidateIsbns = (value['isbn'] as List?) ?? const [];
+      final isbnMatched =
+          isbn.trim().isNotEmpty &&
+          candidateIsbns.any(
+            (value) => _normalizeIsbn(value.toString()) == _normalizeIsbn(isbn),
+          );
+      final titleScore = bookMetadataTextSimilarity(title, candidateTitle);
+      final authorScore = author.trim().isEmpty
+          ? 0.0
+          : bookMetadataTextSimilarity(author, candidateAuthor);
+      ranked.add((
+        doc: value,
+        score: isbnMatched ? 2.0 : titleScore * 0.7 + authorScore * 0.3,
+        isbn: isbnMatched,
+      ));
+    }
+    if (ranked.isEmpty) return null;
+    ranked.sort((a, b) => b.score.compareTo(a.score));
+    final best = ranked.first;
+    final d = best.doc;
+    final authors = d['author_name'] as List?;
+    final resultAuthor = authors != null && authors.isNotEmpty
+        ? authors.first.toString()
+        : '';
+    final bestTitle = (d['title'] as String?) ?? '';
+    final confidentMatch = isConfidentBookMetadataMatch(
+      queryTitle: title,
+      resultTitle: bestTitle,
+      queryAuthor: author,
+      resultAuthor: resultAuthor,
+      isbnMatched: best.isbn,
+    );
+    final secondAuthors = ranked.length < 2
+        ? const <Object>[]
+        : (ranked[1].doc['author_name'] as List?) ?? const [];
+    final secondAuthor = secondAuthors.isEmpty
+        ? ''
+        : secondAuthors.first.toString();
+    final sameIdentityTie =
+        ranked.length == 1 ||
+        (normalizeBookMetadataText(bestTitle) ==
+                normalizeBookMetadataText(
+                  (ranked[1].doc['title'] as String?) ?? '',
+                ) &&
+            normalizeBookMetadataText(resultAuthor) ==
+                normalizeBookMetadataText(secondAuthor));
+    final unambiguous =
+        best.isbn ||
+        sameIdentityTie ||
+        ranked.length == 1 ||
+        best.score - ranked[1].score >= 0.08;
     final key = (d['key'] as String?) ?? '';
     var description = '';
     var publisher = '';
@@ -169,19 +257,56 @@ class EnrichmentService {
       d,
       isbn: isbn.trim().isNotEmpty ? isbn.trim() : foundIsbn,
     );
-    final authors = d['author_name'] as List?;
     return _OlHit(
-      title: (d['title'] as String?) ?? '',
-      author: authors != null && authors.isNotEmpty
-          ? authors.first.toString()
-          : '',
+      title: bestTitle,
+      author: resultAuthor,
       description: description,
       publisher: publisher,
       published: published,
       isbn: foundIsbn,
       numberOfPages: numberOfPages,
       coverId: (d['cover_i'] as num?)?.toInt() ?? 0,
+      confidentMatch: confidentMatch && unambiguous,
     );
+  }
+
+  static String _normalizeIsbn(String value) =>
+      value.replaceAll(RegExp(r'[^0-9Xx]'), '').toUpperCase();
+
+  static bool _isFilenameDerivedTitle(
+    String title,
+    String displayName,
+    Map<String, String> metadata,
+  ) {
+    if (metadata['title_source'] == 'filename' ||
+        RegExp(
+          r'^codar_(?:probe|external|folder_pdf)_\d+$',
+          caseSensitive: false,
+        ).hasMatch(title.trim())) {
+      return true;
+    }
+    if (metadata['title_source'] != null || displayName.trim().isEmpty) {
+      return false;
+    }
+    final fileStem = p.basenameWithoutExtension(displayName);
+    return normalizeBookMetadataText(title) ==
+        normalizeBookMetadataText(fileStem);
+  }
+
+  static String _metadataQueryTitle(String title, String displayName) {
+    if (displayName.trim().isNotEmpty) {
+      return p
+          .basenameWithoutExtension(displayName)
+          .replaceFirst(
+            RegExp(
+              r'\s*(?:\(\s*\d+\s*\)|copy|kopya)\s*$',
+              caseSensitive: false,
+            ),
+            '',
+          )
+          .trim();
+    }
+    return title;
   }
 
   Future<int?> _editionPageCount(
@@ -279,6 +404,7 @@ class _OlHit {
     required this.isbn,
     required this.numberOfPages,
     required this.coverId,
+    required this.confidentMatch,
   });
   final String title;
   final String author;
@@ -288,6 +414,7 @@ class _OlHit {
   final String isbn;
   final int? numberOfPages;
   final int coverId;
+  final bool confidentMatch;
 }
 
 int? parseOpenLibraryPageCount(Object? value) {

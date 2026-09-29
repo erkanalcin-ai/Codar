@@ -85,7 +85,9 @@ class ReaderTextSelectionOffsets {
         utf16Offset += width;
       }
 
-      result.add(block.withSourceOffsets(starts, ends));
+      // Empty/whitespace-only HTML blocks are kept through alignment so their
+      // source spans advance the cursor, then omitted from rendered output.
+      if (!block.isEmpty) result.add(block.withSourceOffsets(starts, ends));
     }
     return result;
   }
@@ -273,6 +275,13 @@ class ReaderTextSelectionOffsets {
   ) {
     var cursor = from;
     while (cursor < source.length) {
+      if (!_isUnicodeWhitespace(renderedRune)) {
+        final skippedWhitespaceEntity = _skipWhitespaceEntity(source, cursor);
+        if (skippedWhitespaceEntity != null) {
+          cursor = skippedWhitespaceEntity;
+          continue;
+        }
+      }
       final unit = source[cursor];
 
       // <br> is rendered as a line break, while ebook-rs contributes one
@@ -350,6 +359,41 @@ class ReaderTextSelectionOffsets {
           source[lastSourceIndex].end,
           lastSourceIndex + 1,
         );
+      }
+    }
+    return null;
+  }
+
+  /// Consumes an entity that represents whitespace only when no rendered
+  /// whitespace is being matched at this position. This covers source
+  /// whitespace omitted with an unrendered HTML block without allowing a
+  /// visible character to be skipped.
+  static int? _skipWhitespaceEntity(List<_SourceUnit> source, int from) {
+    if (from >= source.length ||
+        !source[from].visible ||
+        source[from].rune != 0x26) {
+      return null;
+    }
+
+    final encoded = StringBuffer();
+    var lastSourceIndex = from;
+    for (var i = from; i < source.length && i - from < 64; i++) {
+      final unit = source[i];
+      if (unit.tagSeparator) {
+        lastSourceIndex = i;
+        continue;
+      }
+      if (!unit.visible || unit.visibleWhitespace) return null;
+      encoded.writeCharCode(unit.rune);
+      lastSourceIndex = i;
+      if (unit.rune != 0x3b) continue;
+
+      final value = decodeReaderEntities(encoded.toString());
+      final runes = value.runes;
+      if (value != encoded.toString() &&
+          runes.length == 1 &&
+          _isUnicodeWhitespace(runes.first)) {
+        return lastSourceIndex + 1;
       }
     }
     return null;

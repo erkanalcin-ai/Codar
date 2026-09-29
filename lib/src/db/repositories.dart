@@ -24,6 +24,7 @@ class BooksRepository {
     required String displayName,
     required String mime,
     required String mediastoreUri,
+    String titleSource = 'embedded',
   }) async {
     final now = _now();
     await _db.db.transaction((txn) async {
@@ -47,6 +48,11 @@ class BooksRepository {
         'mediastore_uri': mediastoreUri,
         'cache_path': '',
         'size': fileSize,
+      });
+      await txn.insert('book_metadata', {
+        'book_id': bookId,
+        'key': 'title_source',
+        'value': titleSource,
       });
     });
   }
@@ -138,9 +144,11 @@ class BooksRepository {
     final like = '%$escaped%';
     final rows = await _db.db.rawQuery(
       'SELECT b.* FROM books b $favJoin '
-      'WHERE b.title LIKE ? ESCAPE "\\" OR b.author LIKE ? ESCAPE "\\" '
+      'WHERE b.title LIKE ? ESCAPE "\\" OR b.author LIKE ? ESCAPE "\\" OR '
+      'EXISTS (SELECT 1 FROM book_files bf WHERE bf.book_id = b.book_id '
+      'AND bf.kind = \'original\' AND bf.display_name LIKE ? ESCAPE "\\") '
       'ORDER BY $orderBy',
-      [like, like],
+      [like, like, like],
     );
     return rows.map(BookRecord.fromMap).toList();
   }
@@ -183,8 +191,11 @@ class BooksRepository {
             'SELECT b.*, $progressColumns FROM books b '
             '$favJoin LEFT JOIN reading_progress p ON p.book_id = b.book_id '
             'WHERE b.title LIKE ? ESCAPE "\\" OR '
-            'b.author LIKE ? ESCAPE "\\" ORDER BY $orderBy',
-            [like, like],
+            'b.author LIKE ? ESCAPE "\\" OR EXISTS ('
+            'SELECT 1 FROM book_files bf WHERE bf.book_id = b.book_id '
+            'AND bf.kind = \'original\' AND bf.display_name LIKE ? ESCAPE "\\") '
+            'ORDER BY $orderBy',
+            [like, like, like],
           );
     return rows.map(LibraryBookRecord.fromMap).toList();
   }
@@ -259,6 +270,34 @@ class BooksRepository {
       whereArgs: [bookId],
     );
     await setMetadata(bookId, 'user_edited', '1');
+  }
+
+  /// Updates only import-derived fields while retaining the existing book ID
+  /// and every progress/annotation relation.
+  Future<void> updateMachineDerivedBookFields(
+    String bookId, {
+    required String title,
+    String? author,
+    required String titleSource,
+  }) async {
+    await _db.db.transaction((txn) async {
+      await txn.update(
+        'books',
+        <String, Object?>{'title': title, 'author': ?author},
+        where: 'book_id = ?',
+        whereArgs: [bookId],
+      );
+      await txn.insert('book_metadata', {
+        'book_id': bookId,
+        'key': 'title_source',
+        'value': titleSource,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+      await txn.insert('book_metadata', {
+        'book_id': bookId,
+        'key': 'user_edited',
+        'value': '0',
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+    });
   }
 
   Future<void> deleteBook(String bookId) async {
@@ -512,19 +551,40 @@ class AnnotationsRepository {
   }
 
   Future<int> addBookmark(BookmarkRecord b) async {
-    return _db.db.insert('bookmarks', {
-      'book_id': b.bookId,
-      'section_index': b.sectionIndex,
-      'cfi': b.cfi,
-      'char_offset': b.charOffset,
-      'label': b.label,
-      'created_at': _now(),
+    return _db.db.transaction((txn) async {
+      final existing = await txn.query(
+        'bookmarks',
+        columns: ['id'],
+        where: 'book_id = ? AND section_index = ? AND char_offset = ?',
+        whereArgs: [b.bookId, b.sectionIndex, b.charOffset],
+        limit: 1,
+      );
+      if (existing.isNotEmpty) return existing.first['id'] as int;
+      return txn.insert('bookmarks', {
+        'book_id': b.bookId,
+        'section_index': b.sectionIndex,
+        'cfi': b.cfi,
+        'char_offset': b.charOffset,
+        'label': b.label,
+        'created_at': _now(),
+      });
     });
   }
 
   Future<void> deleteBookmark(int id) async {
     await _db.db.delete('bookmarks', where: 'id = ?', whereArgs: [id]);
   }
+
+  Future<int> deleteBookmarksAt({
+    required String bookId,
+    required int sectionIndex,
+    required int charOffset,
+  }) async =>
+      _db.db.delete(
+        'bookmarks',
+        where: 'book_id = ? AND section_index = ? AND char_offset = ?',
+        whereArgs: [bookId, sectionIndex, charOffset],
+      );
 
   Future<List<BookmarkRecord>> allBookmarks(String bookId) async {
     final rows = await _db.db.query(
@@ -544,6 +604,50 @@ class AnnotationsRepository {
     'quoted_text': quote.quotedText,
     'created_at': _now(),
   });
+
+  /// Atomically toggles one quote at its persisted source location.
+  /// Any legacy duplicate rows for the same selection are removed together.
+  Future<QuoteRecord?> toggleQuote(QuoteRecord quote) async =>
+      _db.db.transaction((txn) async {
+        final where =
+            'book_id = ? AND section_index = ? AND char_offset = ? AND quoted_text = ?';
+        final whereArgs = [
+          quote.bookId,
+          quote.sectionIndex,
+          quote.charOffset,
+          quote.quotedText,
+        ];
+        final existing = await txn.query(
+          'quotes',
+          columns: ['id'],
+          where: where,
+          whereArgs: whereArgs,
+          limit: 1,
+        );
+        if (existing.isNotEmpty) {
+          await txn.delete('quotes', where: where, whereArgs: whereArgs);
+          return null;
+        }
+
+        final createdAt = _now();
+        final id = await txn.insert('quotes', {
+          'book_id': quote.bookId,
+          'section_index': quote.sectionIndex,
+          'char_offset': quote.charOffset,
+          'cfi': quote.cfi,
+          'quoted_text': quote.quotedText,
+          'created_at': createdAt,
+        });
+        return QuoteRecord(
+          id: id,
+          bookId: quote.bookId,
+          sectionIndex: quote.sectionIndex,
+          charOffset: quote.charOffset,
+          cfi: quote.cfi,
+          quotedText: quote.quotedText,
+          createdAt: createdAt,
+        );
+      });
 
   Future<void> deleteQuote(int id) async {
     await _db.db.delete('quotes', where: 'id = ?', whereArgs: [id]);

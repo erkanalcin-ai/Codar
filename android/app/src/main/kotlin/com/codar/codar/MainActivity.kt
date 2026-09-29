@@ -22,6 +22,7 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
+import java.util.concurrent.Executors
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -38,6 +39,7 @@ class MainActivity : FlutterActivity() {
     private val channelName = "codar/storage"
     private var openWithChannel: MethodChannel? = null
     private val pendingOpenWithFiles = mutableListOf<Map<String, Any>>()
+    private val storageExecutor = Executors.newSingleThreadExecutor()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enqueueOpenWithFile(intent, notifyFlutter = false)
@@ -48,6 +50,12 @@ class MainActivity : FlutterActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         enqueueOpenWithFile(intent, notifyFlutter = true)
+    }
+
+    override fun onDestroy() {
+        // Let submitted storage work finish; shutdownNow could interrupt a file copy.
+        storageExecutor.shutdown()
+        super.onDestroy()
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -67,7 +75,9 @@ class MainActivity : FlutterActivity() {
                             val mime = call.argument<String>("mime") ?: "application/octet-stream"
                             val sourceUri = call.argument<String>("sourceUri")!!
                             val size = call.argument<Number>("size")?.toLong() ?: -1L
-                            result.success(copyPickedFile(name, mime, sourceUri, size))
+                            runStorageTask(result) {
+                                copyPickedFile(name, mime, sourceUri, size)
+                            }
                         }
                         "deletePickedSource" -> {
                             val sourceUri = Uri.parse(call.argument<String>("sourceUri")!!)
@@ -83,14 +93,16 @@ class MainActivity : FlutterActivity() {
                             val uri = Uri.parse(call.argument<String>("uri")!!)
                             val path = call.argument<String>("path")!!
                             val size = call.argument<Number>("size")?.toLong() ?: -1L
-                            result.success(copyFileToPath(uri, path, size))
+                            runStorageTask(result) { copyFileToPath(uri, path, size) }
                         }
                         "copyExternalToPath" -> {
                             val uri = Uri.parse(call.argument<String>("uri")!!)
                             val path = call.argument<String>("path")!!
                             val maxBytes = call.argument<Number>("maxBytes")?.toLong()
                                 ?: throw IllegalArgumentException("Missing external file size limit")
-                            result.success(copyExternalToPath(uri, path, maxBytes))
+                            runStorageTask(result) {
+                                copyExternalToPath(uri, path, maxBytes)
+                            }
                         }
                         "listTreeFiles" -> {
                             val treeUri = call.argument<String>("treeUri")!!
@@ -99,6 +111,10 @@ class MainActivity : FlutterActivity() {
                         "isCodarLibRoot" -> {
                             val location = call.argument<String>("location")!!
                             result.success(isCodarLibRoot(location))
+                        }
+                        "managedFileState" -> {
+                            val uri = call.argument<String>("uri")!!
+                            runStorageTask(result) { managedFileState(uri) }
                         }
                         "listCodarLib" -> result.success(listCodarLib())
                         "setSystemUi" -> {
@@ -149,6 +165,19 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    private fun <T> runStorageTask(result: MethodChannel.Result, task: () -> T) {
+        storageExecutor.execute {
+            try {
+                val value = task()
+                runOnUiThread { result.success(value) }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    result.error("STORAGE_ERROR", error.message, null)
+                }
+            }
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -531,6 +560,67 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    /**
+     * Tri-state-safe URI check used by library reconciliation. A failed or
+     * denied provider query is unknown, never proof that a user's book died.
+     */
+    private fun managedFileState(uriString: String): String {
+        return try {
+            val uri = Uri.parse(uriString)
+            if (uri.scheme == "file") {
+                val path = uri.path ?: return "unknown"
+                val root = codarLibRootDirectory().canonicalPath.trimEnd(File.separatorChar)
+                val canonical = File(path).canonicalPath
+                if (!canonical.startsWith(root + File.separator)) return "external"
+                return if (File(canonical).isFile) "managed_present" else "managed_missing"
+            }
+            if (uri.scheme != "content") return "external"
+
+            if (uri.authority == "com.android.externalstorage.documents") {
+                // A SAF tree URI is a provider grant, not CodarLib identity.
+                // Resolve only the exact path to an app-owned MediaStore row;
+                // a display-name match alone must never establish ownership.
+                return if (managedMediaStoreUriFromTreeDocument(uri) != null) {
+                    "managed_present"
+                } else {
+                    "external"
+                }
+            }
+
+            // Modern CodarLib files are created in this exact MediaStore
+            // Downloads collection. A live row is trusted only when both its
+            // owner and relative path match this app's managed destination.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                isCodarDownloadsRowUri(uri)
+            ) {
+                val cursor = contentResolver.query(
+                    uri,
+                    arrayOf(
+                        MediaStore.MediaColumns.OWNER_PACKAGE_NAME,
+                        MediaStore.MediaColumns.RELATIVE_PATH,
+                    ),
+                    null,
+                    null,
+                    null,
+                ) ?: return "unknown"
+                return cursor.use {
+                    if (!it.moveToFirst()) return@use "managed_missing"
+                    val ownerColumn = it.getColumnIndex(MediaStore.MediaColumns.OWNER_PACKAGE_NAME)
+                    val pathColumn = it.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
+                    if (ownerColumn < 0 || pathColumn < 0) return@use "unknown"
+                    if (it.getString(ownerColumn) == applicationContext.packageName &&
+                        it.getString(pathColumn) == downloadsRelativePath
+                    ) "managed_present" else "external"
+                }
+            }
+            "external"
+        } catch (_: SecurityException) {
+            "unknown"
+        } catch (_: Exception) {
+            "unknown"
+        }
+    }
+
     @Suppress("DEPRECATION")
     private fun codarLibTreeDocumentId(): String? {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -625,23 +715,30 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun listCodarLib(): List<Map<String, String>> {
+    private fun listCodarLib(): List<Map<String, Any>> {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             listModernMediaStore()
         } else {
             (legacyLibraryDir().listFiles()
                 ?: throw IllegalStateException("Cannot list CodarLib files"))
                 .filter { it.isFile }
-                .map { mapOf("name" to it.name, "uri" to Uri.fromFile(it).toString()) }
+                .map {
+                    mapOf(
+                        "name" to it.name,
+                        "uri" to Uri.fromFile(it).toString(),
+                        "size" to it.length(),
+                    )
+                }
         }
     }
 
-    private fun listModernMediaStore(): List<Map<String, String>> {
-        val out = mutableListOf<Map<String, String>>()
+    private fun listModernMediaStore(): List<Map<String, Any>> {
+        val out = mutableListOf<Map<String, Any>>()
         val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         val projection = arrayOf(
             MediaStore.MediaColumns._ID,
-            MediaStore.MediaColumns.DISPLAY_NAME
+            MediaStore.MediaColumns.DISPLAY_NAME,
+            MediaStore.MediaColumns.SIZE,
         )
         // Only our own entries: no permission needed, no other app's files leak in.
         val selection = "${MediaStore.MediaColumns.OWNER_PACKAGE_NAME} = ? AND " +
@@ -652,10 +749,17 @@ class MainActivity : FlutterActivity() {
         cursor.use {
             val idCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
             val nameCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
+            val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idCol)
                 val uri = ContentUris.withAppendedId(collection, id).toString()
-                out.add(mapOf("name" to cursor.getString(nameCol), "uri" to uri))
+                out.add(
+                    mapOf(
+                        "name" to cursor.getString(nameCol),
+                        "uri" to uri,
+                        "size" to cursor.getLong(sizeCol),
+                    ),
+                )
             }
         }
         return out
@@ -665,9 +769,85 @@ class MainActivity : FlutterActivity() {
         val uri = Uri.parse(uriString)
         if (uri.scheme == "file") {
             val path = uri.path ?: return false
+            if (managedFileState(uriString) != "managed_present") return false
             return File(path).delete()
         }
-        return contentResolver.delete(uri, null, null) > 0
+        // Never delete arbitrary content URIs from book_files. Resolve to a
+        // live MediaStore row whose owner and complete CodarLib path match.
+        val managedUri = managedMediaStoreUri(uri) ?: return false
+        return contentResolver.delete(managedUri, null, null) > 0
+    }
+
+    /** Matches only a row URI from the exact MediaStore collection Codar writes. */
+    private fun isCodarDownloadsRowUri(uri: Uri): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+            uri.scheme != "content" ||
+            uri.authority != MediaStore.AUTHORITY
+        ) {
+            return false
+        }
+        val rowSegments = uri.pathSegments
+        val collections = listOf(
+            MediaStore.VOLUME_EXTERNAL_PRIMARY,
+            MediaStore.VOLUME_EXTERNAL,
+        )
+        return collections.any { volume ->
+            val collectionSegments = MediaStore.Downloads.getContentUri(
+                volume,
+            ).pathSegments
+            rowSegments.size == collectionSegments.size + 1 &&
+                rowSegments.take(collectionSegments.size) == collectionSegments &&
+                rowSegments.lastOrNull()?.toLongOrNull() != null
+        }
+    }
+
+    private fun managedMediaStoreUri(uri: Uri): Uri? {
+        if (isCodarDownloadsRowUri(uri)) {
+            return uri.takeIf { managedFileState(it.toString()) == "managed_present" }
+        }
+        if (uri.authority == "com.android.externalstorage.documents") {
+            return managedMediaStoreUriFromTreeDocument(uri)
+        }
+        return null
+    }
+
+    private fun managedMediaStoreUriFromTreeDocument(uri: Uri): Uri? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+        val rootId = codarLibTreeDocumentId()?.trimEnd('/') ?: return null
+        val documentId = try {
+            DocumentsContract.getDocumentId(uri)
+        } catch (_: IllegalArgumentException) {
+            return null
+        }
+        if (!documentId.startsWith("$rootId/")) return null
+
+        val relative = documentId.removePrefix("primary:")
+        val prefix = downloadsRelativePath
+        if (!relative.startsWith(prefix)) return null
+        val entryName = relative.removePrefix(prefix)
+        // CodarLib's managed MediaStore contract stores files directly in its
+        // root. Nested or ambiguous paths are not silently mapped.
+        if (entryName.isEmpty() || entryName.contains('/')) return null
+
+        val collection = MediaStore.Downloads.getContentUri(
+            MediaStore.VOLUME_EXTERNAL_PRIMARY,
+        )
+        val cursor = contentResolver.query(
+            collection,
+            arrayOf(MediaStore.MediaColumns._ID),
+            "${MediaStore.MediaColumns.OWNER_PACKAGE_NAME} = ? AND " +
+                "${MediaStore.MediaColumns.RELATIVE_PATH} = ? AND " +
+                "${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
+            arrayOf(applicationContext.packageName, downloadsRelativePath, entryName),
+            null,
+        ) ?: return null
+        return cursor.use {
+            val idColumn = it.getColumnIndex(MediaStore.MediaColumns._ID)
+            if (idColumn < 0 || !it.moveToFirst()) return@use null
+            val id = it.getLong(idColumn)
+            if (it.moveToNext()) return@use null
+            ContentUris.withAppendedId(collection, id)
+        }
     }
 
     private val downloadsRelativePath =

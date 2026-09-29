@@ -14,11 +14,13 @@ class BookCover extends ConsumerWidget {
     required this.book,
     this.width = 96,
     this.height = 144,
+    this.showTitleFallback = true,
   });
 
   final BookRecord book;
   final double width;
   final double height;
+  final bool showTitleFallback;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -44,6 +46,37 @@ class BookCover extends ConsumerWidget {
   }
 
   Widget _fallback(BuildContext context) {
+    return BookCoverFallback(
+      title: book.title,
+      author: book.author,
+      format: book.format,
+      width: width,
+      height: height,
+      showTitle: showTitleFallback,
+    );
+  }
+}
+
+class BookCoverFallback extends StatelessWidget {
+  const BookCoverFallback({
+    super.key,
+    required this.title,
+    required this.author,
+    required this.format,
+    required this.width,
+    required this.height,
+    this.showTitle = true,
+  });
+
+  final String title;
+  final String author;
+  final String format;
+  final double width;
+  final double height;
+  final bool showTitle;
+
+  @override
+  Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),
@@ -72,28 +105,42 @@ class BookCover extends ConsumerWidget {
               size: width < 60 ? 20 : 28,
             ),
             const SizedBox(height: 8),
-            Text(
-              book.title.isEmpty ? '—' : book.title,
-              maxLines: 4,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Colors.white,
-                fontWeight: FontWeight.w600,
-                height: 1.2,
-              ),
-            ),
-            if (book.author.isNotEmpty) ...[
-              const SizedBox(height: 5),
+            if (showTitle) ...[
               Text(
-                book.author,
+                title.isEmpty ? '—' : title,
+                maxLines: 4,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w600,
+                  height: 1.2,
+                ),
+              ),
+              if (author.isNotEmpty) ...[
+                const SizedBox(height: 5),
+                Text(
+                  author,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.labelSmall?.copyWith(color: Colors.white70),
+                ),
+              ],
+            ] else
+              Text(
+                format.isEmpty ? 'BOOK' : format.toUpperCase(),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.labelSmall
-                    ?.copyWith(color: Colors.white70),
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: Colors.white70,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.7,
+                ),
               ),
-            ],
           ],
         ),
       ),
