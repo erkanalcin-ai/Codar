@@ -33,6 +33,7 @@ const _tr = {
   'importFailed': 'Aktarım başarısız',
   'sourceRetained': 'Kaynak dosya silinemedi; dosya yerinde kaldı.',
   'deleteFileFailed': 'Dosya silinemedi; kitap kaydı korundu.',
+  'bookEntryRemovedFileRetained': 'Kitap kütüphaneden silindi; dosya sahipliği doğrulanamadığı için fiziksel dosya korundu.',
   'unsupportedType': 'Desteklenmeyen dosya türü',
   'read': 'Oku',
   'openLibrary': 'Kütüphaneyi aç',
@@ -200,6 +201,7 @@ const _en = {
   'sourceRetained': 'The source file could not be deleted and was kept.',
   'deleteFileFailed':
       'The file could not be deleted; the book record was kept.',
+  'bookEntryRemovedFileRetained': 'The book was removed from the Library; the file was kept because ownership could not be verified.',
   'unsupportedType': 'Unsupported file type',
   'read': 'Read',
   'openLibrary': 'Open library',

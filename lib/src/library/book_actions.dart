@@ -207,9 +207,14 @@ Future<bool> confirmDeleteBook(
   );
   if (ok != true || !context.mounted) return false;
   try {
-    await ref
+    final fileRetained = await ref
         .read(importServiceProvider)
         .deleteBook(bookId, deleteFile: deleteFile);
+    if (fileRetained && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(tr(locale, 'bookEntryRemovedFileRetained'))),
+      );
+    }
   } on ImportException {
     if (context.mounted) {
       ScaffoldMessenger.of(

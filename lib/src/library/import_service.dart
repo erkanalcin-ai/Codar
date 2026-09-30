@@ -107,6 +107,41 @@ class _FolderCandidate {
   final String? localPath;
 }
 
+/// Removes a library record without requiring an unverified or unavailable
+/// provider URI to be physically deletable. Returns true when a requested file
+/// deletion had to be skipped or failed, so the UI can explain that the file
+/// was retained.
+Future<bool> deleteBookEntryWithSafeFileHandling({
+  required String? fileUri,
+  required bool deleteFile,
+  required Future<ManagedFileState> Function(String uri) inspectFile,
+  required Future<bool> Function(String uri) deleteManagedFile,
+  required Future<void> Function() deleteRecord,
+}) async {
+  final uri = fileUri?.trim();
+  var state = ManagedFileState.unknown;
+  if (deleteFile && uri != null && uri.isNotEmpty) {
+    try {
+      state = await inspectFile(uri);
+    } catch (_) {
+      state = ManagedFileState.unknown;
+    }
+  }
+
+  // Commit the user's Library removal before best-effort file cleanup. If the
+  // database delete fails, the managed source file is still untouched.
+  await deleteRecord();
+
+  if (!deleteFile || uri == null || uri.isEmpty) return false;
+  if (state == ManagedFileState.managedMissing) return false;
+  if (state != ManagedFileState.managedPresent) return true;
+  try {
+    return !await deleteManagedFile(uri);
+  } catch (_) {
+    return true;
+  }
+}
+
 class ImportService {
   ImportService({
     required this.reader,
@@ -853,28 +888,34 @@ class ImportService {
   /// see Settings) the Downloads/CodarLib/ copy is removed as well;
   /// otherwise only the DB row + app-private staged copy/cover are purged
   /// (used when the file is already gone, or the user chose to keep it).
-  Future<void> deleteBook(String bookId, {bool deleteFile = true}) async {
-    if (deleteFile) {
-      final file = await books.getFile(bookId, 'original');
-      if (file != null && file.mediastoreUri.isNotEmpty) {
-        try {
-          if (!await storage.deleteFile(file.mediastoreUri)) {
-            throw ImportException('delete-file-failed');
-          }
-        } catch (_) {
-          throw ImportException('delete-file-failed');
-        }
+  Future<bool> deleteBook(String bookId, {bool deleteFile = true}) async {
+    final file = await books.getFile(bookId, 'original');
+    final cover = await books.coverPath(bookId);
+    final fileRetained = await deleteBookEntryWithSafeFileHandling(
+      fileUri: file?.mediastoreUri,
+      deleteFile: deleteFile,
+      inspectFile: storage.managedFileState,
+      deleteManagedFile: storage.deleteFile,
+      deleteRecord: () => books.deleteBook(bookId),
+    );
+
+    try {
+      final dir = await getApplicationSupportDirectory();
+      final bookDir = Directory(p.join(dir.path, 'books', bookId));
+      if (await bookDir.exists()) await bookDir.delete(recursive: true);
+    } catch (_) {
+      // The database removal is authoritative; stale private staging can be
+      // recreated only by a future import of the same book.
+    }
+    if (cover != null) {
+      try {
+        final f = File(cover);
+        if (await f.exists()) await f.delete();
+      } catch (_) {
+        // Do not make an otherwise successful Library deletion fail.
       }
     }
-    final dir = await getApplicationSupportDirectory();
-    final bookDir = Directory(p.join(dir.path, 'books', bookId));
-    if (await bookDir.exists()) await bookDir.delete(recursive: true);
-    final cover = await books.coverPath(bookId);
-    if (cover != null) {
-      final f = File(cover);
-      if (await f.exists()) await f.delete();
-    }
-    await books.deleteBook(bookId);
+    return fileRetained;
   }
 
   static String _clean(String s) => s.replaceAll(RegExp(r'\s+'), ' ').trim();
