@@ -53,6 +53,8 @@ void main() {
       'missingFile',
       'missingFileReimport',
       'recolor',
+      'annotationSaveFailed',
+      'annotationOperationFailed',
     ];
     for (final k in keys) {
       expect(tr('en', k), isNot(k), reason: 'missing EN key: $k');

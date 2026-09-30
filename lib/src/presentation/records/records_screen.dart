@@ -172,6 +172,15 @@ String _safe(String s, int max) {
   return one.length <= max ? one : '${one.substring(0, max)}…';
 }
 
+void _showAnnotationOperationFailure(BuildContext context, WidgetRef ref) {
+  if (!context.mounted) return;
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text(tr(ref.read(localeProvider), 'annotationOperationFailed')),
+    ),
+  );
+}
+
 class _HighlightsTab extends ConsumerWidget {
   const _HighlightsTab({required this.items});
   final List<(String, HighlightRecord)> items;
@@ -215,10 +224,15 @@ class _HighlightsTab extends ConsumerWidget {
                   tooltip: tr(locale, 'recolor'),
                   icon: const Icon(Icons.palette_outlined),
                   onSelected: (color) async {
-                    await ref
-                        .read(annotationsRepoProvider)
-                        .updateHighlightColor(h.id!, color);
-                    ref.read(libraryRefreshProvider.notifier).bump();
+                    try {
+                      await ref
+                          .read(annotationsRepoProvider)
+                          .updateHighlightColor(h.id!, color);
+                      if (!context.mounted) return;
+                      ref.read(libraryRefreshProvider.notifier).bump();
+                    } catch (_) {
+                      _showAnnotationOperationFailure(context, ref);
+                    }
                   },
                   itemBuilder: (c) => [
                     for (final color in highlightPalette)
@@ -240,10 +254,15 @@ class _HighlightsTab extends ConsumerWidget {
                   tooltip: tr(locale, 'delete'),
                   icon: const Icon(Icons.delete_outline),
                   onPressed: () async {
-                    await ref
-                        .read(annotationsRepoProvider)
-                        .deleteHighlight(h.id!);
-                    ref.read(libraryRefreshProvider.notifier).bump();
+                    try {
+                      await ref
+                          .read(annotationsRepoProvider)
+                          .deleteHighlight(h.id!);
+                      if (!context.mounted) return;
+                      ref.read(libraryRefreshProvider.notifier).bump();
+                    } catch (_) {
+                      _showAnnotationOperationFailure(context, ref);
+                    }
                   },
                 ),
               ],
@@ -291,8 +310,13 @@ class _NotesTab extends ConsumerWidget {
               tooltip: tr(locale, 'delete'),
               icon: const Icon(Icons.delete_outline),
               onPressed: () async {
-                await ref.read(annotationsRepoProvider).deleteNote(n.id!);
-                ref.read(libraryRefreshProvider.notifier).bump();
+                try {
+                  await ref.read(annotationsRepoProvider).deleteNote(n.id!);
+                  if (!context.mounted) return;
+                  ref.read(libraryRefreshProvider.notifier).bump();
+                } catch (_) {
+                  _showAnnotationOperationFailure(context, ref);
+                }
               },
             ),
             onTap: () => _jump(
@@ -342,8 +366,13 @@ class _BookmarksTab extends ConsumerWidget {
               tooltip: tr(locale, 'delete'),
               icon: const Icon(Icons.delete_outline),
               onPressed: () async {
-                await ref.read(annotationsRepoProvider).deleteBookmark(b.id!);
-                ref.read(libraryRefreshProvider.notifier).bump();
+                try {
+                  await ref.read(annotationsRepoProvider).deleteBookmark(b.id!);
+                  if (!context.mounted) return;
+                  ref.read(libraryRefreshProvider.notifier).bump();
+                } catch (_) {
+                  _showAnnotationOperationFailure(context, ref);
+                }
               },
             ),
             onTap: () => _jump(
@@ -390,8 +419,15 @@ class _QuotesTab extends ConsumerWidget {
               icon: const Icon(Icons.delete_outline),
               onPressed: () async {
                 if (quote.id == null) return;
-                await ref.read(annotationsRepoProvider).deleteQuote(quote.id!);
-                ref.read(libraryRefreshProvider.notifier).bump();
+                try {
+                  await ref
+                      .read(annotationsRepoProvider)
+                      .deleteQuote(quote.id!);
+                  if (!context.mounted) return;
+                  ref.read(libraryRefreshProvider.notifier).bump();
+                } catch (_) {
+                  _showAnnotationOperationFailure(context, ref);
+                }
               },
             ),
             onTap: () => _jump(

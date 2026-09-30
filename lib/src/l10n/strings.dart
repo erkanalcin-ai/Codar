@@ -65,6 +65,8 @@ const _tr = {
   'bookmarks': 'Yer İmleri',
   'addBookmark': 'Yer imi ekle',
   'bookmarkAdded': 'Yer imi eklendi',
+  'annotationSaveFailed': 'Kayıt kaydedilemedi. Tekrar deneyin.',
+  'annotationOperationFailed': 'İşlem tamamlanamadı. Tekrar deneyin.',
   'addNote': 'Not ekle',
   'noteHint': 'Notunu yaz…',
   'save': 'Kaydet',
@@ -233,6 +235,9 @@ const _en = {
   'bookmarks': 'Bookmarks',
   'addBookmark': 'Add bookmark',
   'bookmarkAdded': 'Bookmark added',
+  'annotationSaveFailed': 'The item could not be saved. Please try again.',
+  'annotationOperationFailed':
+      'The operation could not be completed. Please try again.',
   'addNote': 'Add note',
   'noteHint': 'Write your note…',
   'save': 'Save',

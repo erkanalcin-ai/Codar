@@ -2112,7 +2112,10 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       });
       _clearSelection();
     } catch (_) {
-      if (mounted) setState(() => _saving = false);
+      if (mounted) {
+        setState(() => _saving = false);
+        _showAnnotationSaveFailure();
+      }
     }
   }
 
@@ -2231,7 +2234,40 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       }
       if (mounted) setState(() => _saving = false);
     } catch (_) {
-      if (mounted) setState(() => _saving = false);
+      try {
+        await _refreshSelectionHighlightsAfterFailure(pending);
+      } catch (_) {
+        // The save failure remains visible below; this read only reconciles
+        // any highlight fragments that committed before the failed write.
+      }
+      _keepSelectionAfterHighlightUpdate = false;
+      if (mounted) {
+        setState(() => _saving = false);
+        _showAnnotationSaveFailure();
+      }
+    }
+  }
+
+  Future<void> _refreshSelectionHighlightsAfterFailure(
+    _PendingSelection pending,
+  ) async {
+    final annotations = ref.read(annotationsRepoProvider);
+    for (final selection in pending.ranges) {
+      final source = _sourceTextForSection(selection.sectionIndex);
+      final blocks = _blocksForSection(selection.sectionIndex);
+      if (source == null || blocks == null) continue;
+      final stored = await annotations.highlightsForSection(
+        widget.bookId,
+        selection.sectionIndex,
+      );
+      final resolved = await _resolveHighlightCoordinates(
+        selection.sectionIndex,
+        source,
+        blocks,
+        stored,
+      );
+      _replaceCachedSectionHighlights(selection.sectionIndex, resolved);
+      if (selection.sectionIndex == _section) _highlights = resolved;
     }
   }
 
@@ -2360,7 +2396,10 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         );
       }
     } catch (_) {
-      if (mounted) setState(() => _bookmarkSaving = false);
+      if (mounted) {
+        setState(() => _bookmarkSaving = false);
+        _showAnnotationSaveFailure();
+      }
     }
   }
 
@@ -2416,7 +2455,18 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
             ),
           );
       _clearSelection();
-    } catch (_) {}
+    } catch (_) {
+      _showAnnotationSaveFailure();
+    }
+  }
+
+  void _showAnnotationSaveFailure() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(tr(ref.read(localeProvider), 'annotationSaveFailed')),
+      ),
+    );
   }
 
   Future<void> _openChapters() async {
