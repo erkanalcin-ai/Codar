@@ -4,8 +4,8 @@
 // Invalid/unopenable sources therefore remain where the user selected them;
 // successful file-picker imports remove the selected source after the book
 // and CodarLib copy are recorded. If source removal fails, the user is told.
-// Folder imports retain selected originals; large PDFs are streamed from the
-// folder source to avoid a full Dart-side byte buffer.
+// Folder imports retain selected originals; Android validation and CodarLib
+// copies stream through native storage rather than Dart byte buffers.
 
 import 'dart:io';
 import 'dart:typed_data';
@@ -41,6 +41,18 @@ const _allowedExtensions = {
 
 /// Keep the engine out of pathological territory.
 const maxImportBytes = 200 * 1024 * 1024;
+
+/// Validates an observed source size against the import limit and a provider's
+/// reported size, when one is available.
+int validateImportFileSize(int actualSize, {int? expectedSize}) {
+  if (actualSize <= 0 || actualSize > maxImportBytes) {
+    throw ImportException('bad-size');
+  }
+  if (expectedSize != null && expectedSize > 0 && actualSize != expectedSize) {
+    throw ImportException('source-changed');
+  }
+  return actualSize;
+}
 
 class ImportResult {
   ImportResult({
@@ -95,14 +107,12 @@ class _FolderCandidate {
   _FolderCandidate({
     required this.displayName,
     required this.size,
-    required this.readBytes,
     this.sourceUri,
     this.localPath,
   });
 
   final String displayName;
   final int size;
-  final Future<List<int>> Function() readBytes;
   final String? sourceUri;
   final String? localPath;
 }
@@ -248,18 +258,17 @@ class ImportService {
 
     final sourceIsCodarLib =
         Platform.isAndroid && await storage.isCodarLibRoot(selected);
-    // For the app-managed root, enumerate CodarLib through its authoritative
-    // storage listing. SAF child URIs are transient provider handles; storing
-    // them as book_files would make later open/delete depend on the tree grant.
+    // For the app-managed root, enumerate the exact selected SAF tree. This
+    // also finds older CodarLib files whose MediaStore owner metadata no longer
+    // matches the current installation. Native storage returns a managed URI
+    // when available and otherwise a child URI backed by the persisted grant.
     final candidates = sourceIsCodarLib
-        ? (await storage.listCodarLib())
+        ? (await storage.listCodarLibFromTree(selected))
               .map(
                 (file) => _FolderCandidate(
                   displayName: file.name,
                   size: file.size,
                   sourceUri: file.uri,
-                  readBytes: () =>
-                      storage.readFile(file.uri, maxBytes: maxImportBytes),
                 ),
               )
               .toList()
@@ -282,20 +291,10 @@ class ImportService {
           if (candidate.size > maxImportBytes) {
             throw ImportException('bad-size');
           }
-          // Stream large PDFs from their source and retain folder originals;
-          // other folder formats keep the existing byte-copy path.
-          final result =
-              _extension(candidate.displayName) == 'pdf' &&
-                  candidate.sourceUri != null &&
-                  candidate.size > 0
-              ? await _importFolderPdf(
-                  candidate,
-                  sourceIsCodarLib: sourceIsCodarLib,
-                )
-              : await _importFolderCandidate(
-                  candidate,
-                  sourceIsCodarLib: sourceIsCodarLib,
-                );
+          final result = await _importFolderCandidate(
+            candidate,
+            sourceIsCodarLib: sourceIsCodarLib,
+          );
           results.add(result);
           if (result.isNew) {
             imported++;
@@ -332,12 +331,22 @@ class ImportService {
     final androidPicked = picked is android.AndroidPlatformFile ? picked : null;
     final sourceUri = androidPicked?.safHandle?.uri.toString();
     final pickerCachePath = androidPicked?.path;
+    String? ownedValidationPath;
     try {
-      // Size gate BEFORE reading bytes: readAsBytes materializes the whole
-      // file in RAM, so an oversized pick must be rejected up front.
       final pickedSize = await picked.length();
       if (pickedSize > maxImportBytes) {
         throw ImportException('bad-size');
+      }
+      if (!Platform.isAndroid) {
+        // Non-Android storage still uses the existing byte-based adapter.
+        // Keep that platform's established import contract intact.
+        final bytes = await picked.readAsBytes();
+        validateImportFileSize(bytes.length, expectedSize: pickedSize);
+        return await importBytes(
+          displayName: picked.name,
+          bytes: bytes,
+          sourceSize: bytes.length,
+        );
       }
       if (sourceUri == null || sourceUri.isEmpty) {
         // Moving a picker cache path would leave the real Downloads file in
@@ -345,15 +354,33 @@ class ImportService {
         throw ImportException('source-unavailable');
       }
       final ext = _extension(picked.name);
-      // SAF exposes a cache file for validation. Hash PDFs from that file in
-      // chunks instead of also materializing the complete PDF in Dart memory.
-      final bytes = ext == 'pdf' ? const <int>[] : await picked.readAsBytes();
+      String? validationPath;
+      if (pickerCachePath != null && await File(pickerCachePath).exists()) {
+        validationPath = pickerCachePath;
+      } else {
+        final tempDir = await getTemporaryDirectory();
+        ownedValidationPath = p.join(
+          tempDir.path,
+          'codar_picker_${DateTime.now().microsecondsSinceEpoch}.$ext',
+        );
+        final copied = await storage.copyExternalToPath(
+          uri: sourceUri,
+          path: ownedValidationPath,
+          maxBytes: maxImportBytes,
+        );
+        if (!copied) throw ImportException('source-unavailable');
+        validationPath = ownedValidationPath;
+      }
+      final actualSize = validateImportFileSize(
+        await File(validationPath).length(),
+        expectedSize: pickedSize,
+      );
       return await importBytes(
         displayName: picked.name,
-        bytes: bytes,
+        bytes: const [],
         sourceUri: sourceUri,
-        validationPath: pickerCachePath,
-        sourceSize: pickedSize,
+        validationPath: validationPath,
+        sourceSize: actualSize,
       );
     } finally {
       // file_picker materializes an app-private cache copy for SAF files.
@@ -362,6 +389,12 @@ class ImportService {
         final cache = File(pickerCachePath);
         try {
           if (await cache.exists()) await cache.delete();
+        } catch (_) {}
+      }
+      if (ownedValidationPath != null) {
+        try {
+          final validation = File(ownedValidationPath);
+          if (await validation.exists()) await validation.delete();
         } catch (_) {}
       }
       try {
@@ -380,8 +413,6 @@ class ImportService {
                 displayName: file.name,
                 size: file.size,
                 sourceUri: file.uri,
-                readBytes: () =>
-                    storage.readFile(file.uri, maxBytes: maxImportBytes),
               ),
             )
             .toList();
@@ -403,7 +434,6 @@ class ImportService {
             size: await file.length(),
             sourceUri: file.uri.toString(),
             localPath: file.path,
-            readBytes: file.readAsBytes,
           ),
         );
       }
@@ -419,50 +449,54 @@ class ImportService {
     _FolderCandidate candidate, {
     required bool sourceIsCodarLib,
   }) async {
-    final bytes = await candidate.readBytes();
-    if (sourceIsCodarLib &&
-        candidate.size > 0 &&
-        candidate.size != bytes.length) {
-      throw ImportException('source-changed');
+    if (!Platform.isAndroid) {
+      final file = candidate.localPath == null
+          ? null
+          : File(candidate.localPath!);
+      final bytes = file == null
+          ? await storage.readFile(
+              candidate.sourceUri!,
+              maxBytes: maxImportBytes,
+            )
+          : await file.readAsBytes();
+      validateImportFileSize(bytes.length, expectedSize: candidate.size);
+      return importBytes(
+        displayName: candidate.displayName,
+        bytes: bytes,
+        removeSource: false,
+      );
     }
-    return importBytes(
-      displayName: candidate.displayName,
-      bytes: bytes,
-      sourceUri: sourceIsCodarLib ? candidate.sourceUri : null,
-      sourceSize: sourceIsCodarLib ? bytes.length : null,
-      removeSource: !sourceIsCodarLib,
-      sourceIsCodarLib: sourceIsCodarLib,
-    );
-  }
 
-  Future<ImportResult> _importFolderPdf(
-    _FolderCandidate candidate, {
-    required bool sourceIsCodarLib,
-  }) async {
-    final sourceUri = candidate.sourceUri!;
-    final localPath = candidate.localPath;
+    final sourceUri = candidate.sourceUri;
     final validationPath =
-        localPath ??
+        candidate.localPath ??
         p.join(
           (await getTemporaryDirectory()).path,
-          'codar_folder_pdf_${DateTime.now().microsecondsSinceEpoch}.pdf',
+          'codar_folder_${DateTime.now().microsecondsSinceEpoch}.${_extension(candidate.displayName)}',
         );
-    final ownsValidationFile = localPath == null;
+    final ownsValidationFile = candidate.localPath == null;
     try {
       if (ownsValidationFile) {
-        final copied = await storage.copyFileToPath(
+        if (sourceUri == null || sourceUri.isEmpty) {
+          throw ImportException('source-unavailable');
+        }
+        final copied = await storage.copyExternalToPath(
           uri: sourceUri,
           path: validationPath,
-          size: candidate.size,
+          maxBytes: maxImportBytes,
         );
         if (!copied) throw ImportException('source-unavailable');
       }
+      final actualSize = validateImportFileSize(
+        await File(validationPath).length(),
+        expectedSize: candidate.size,
+      );
       return await importBytes(
         displayName: candidate.displayName,
         bytes: const [],
         sourceUri: sourceUri,
         validationPath: validationPath,
-        sourceSize: candidate.size,
+        sourceSize: actualSize,
         removeSource: false,
         sourceIsCodarLib: sourceIsCodarLib,
       );
@@ -609,6 +643,9 @@ class ImportService {
     try {
       if (ownsProbe) await probe.writeAsBytes(bytes, flush: true);
       if (!await probe.exists()) throw ImportException('source-unavailable');
+      if (bytes.isEmpty && validationPath != null) {
+        validateImportFileSize(await probe.length(), expectedSize: fileSize);
+      }
       await reader.withBook(probe.path, (s) async {
         final info = await reader.getDocumentInfo(s);
         final engineTitle = _clean(info.title);

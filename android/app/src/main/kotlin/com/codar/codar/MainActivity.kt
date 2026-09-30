@@ -36,6 +36,10 @@ import io.flutter.plugin.common.MethodChannel
  * app's own entries are listed/read.
  */
 class MainActivity : FlutterActivity() {
+    companion object {
+        private const val MAX_IMPORT_BYTES = 200L * 1024 * 1024
+    }
+
     private val channelName = "codar/storage"
     private var openWithChannel: MethodChannel? = null
     private val pendingOpenWithFiles = mutableListOf<Map<String, Any>>()
@@ -68,7 +72,7 @@ class MainActivity : FlutterActivity() {
                             val name = call.argument<String>("name")!!
                             val mime = call.argument<String>("mime") ?: "application/octet-stream"
                             val bytes = call.argument<ByteArray>("bytes")!!
-                            result.success(importFile(name, mime, bytes))
+                            runStorageTask(result) { importFile(name, mime, bytes) }
                         }
                         "copyPickedFile" -> {
                             val name = call.argument<String>("name")!!
@@ -81,13 +85,13 @@ class MainActivity : FlutterActivity() {
                         }
                         "deletePickedSource" -> {
                             val sourceUri = Uri.parse(call.argument<String>("sourceUri")!!)
-                            result.success(deleteSource(sourceUri))
+                            runStorageTask(result) { deleteSource(sourceUri) }
                         }
                         "readFile" -> {
                             val uri = call.argument<String>("uri")!!
                             val maxBytes = call.argument<Number>("maxBytes")?.toLong()
                                 ?: throw IllegalArgumentException("Missing readFile size limit")
-                            result.success(readFile(uri, maxBytes))
+                            runStorageTask(result) { readFile(uri, maxBytes) }
                         }
                         "copyFileToPath" -> {
                             val uri = Uri.parse(call.argument<String>("uri")!!)
@@ -106,7 +110,11 @@ class MainActivity : FlutterActivity() {
                         }
                         "listTreeFiles" -> {
                             val treeUri = call.argument<String>("treeUri")!!
-                            result.success(listTreeFiles(treeUri))
+                            runStorageTask(result) { listTreeFiles(treeUri) }
+                        }
+                        "listCodarLibFromTree" -> {
+                            val treeUri = call.argument<String>("treeUri")!!
+                            runStorageTask(result) { listCodarLibFromTree(treeUri) }
                         }
                         "isCodarLibRoot" -> {
                             val location = call.argument<String>("location")!!
@@ -116,7 +124,7 @@ class MainActivity : FlutterActivity() {
                             val uri = call.argument<String>("uri")!!
                             runStorageTask(result) { managedFileState(uri) }
                         }
-                        "listCodarLib" -> result.success(listCodarLib())
+                        "listCodarLib" -> runStorageTask(result) { listCodarLib() }
                         "setSystemUi" -> {
                             val lightStatusBar =
                                 call.argument<Boolean>("lightStatusBar") ?: false
@@ -130,7 +138,7 @@ class MainActivity : FlutterActivity() {
                         }
                         "deleteFile" -> {
                             val uri = call.argument<String>("uri")!!
-                            result.success(deleteMediaFile(uri))
+                            runStorageTask(result) { deleteMediaFile(uri) }
                         }
                         else -> result.notImplemented()
                     }
@@ -146,7 +154,9 @@ class MainActivity : FlutterActivity() {
                 if (call.method == "takePendingOpenWithFiles") {
                     val pending = pendingOpenWithFiles.toList()
                     pendingOpenWithFiles.clear()
-                    result.success(pending)
+                    runStorageTask(result) {
+                        pending.map(::resolveOpenWithFile)
+                    }
                 } else {
                     result.notImplemented()
                 }
@@ -234,18 +244,34 @@ class MainActivity : FlutterActivity() {
     private fun enqueueOpenWithFile(intent: Intent?, notifyFlutter: Boolean) {
         if (intent?.action != Intent.ACTION_VIEW) return
         val uri = intent.data ?: return
-        val fileInfo = mapOf(
+        val pendingInfo = mapOf(
             "uri" to uri.toString(),
-            "displayName" to queryDisplayName(uri),
-            "mimeType" to (intent.type ?: contentResolver.getType(uri) ?: ""),
-            "size" to querySize(uri),
+            "intentMimeType" to (intent.type ?: ""),
         )
         val channel = if (notifyFlutter) openWithChannel else null
         if (channel == null) {
-            pendingOpenWithFiles.add(fileInfo)
+            pendingOpenWithFiles.add(pendingInfo)
         } else {
-            channel.invokeMethod("openWithFile", fileInfo)
+            storageExecutor.execute {
+                val fileInfo = resolveOpenWithFile(pendingInfo)
+                runOnUiThread {
+                    if (!isDestroyed) {
+                        openWithChannel?.invokeMethod("openWithFile", fileInfo)
+                    }
+                }
+            }
         }
+    }
+
+    private fun resolveOpenWithFile(pending: Map<String, Any>): Map<String, Any> {
+        val uri = Uri.parse(pending["uri"] as String)
+        val mime = pending["intentMimeType"] as? String ?: ""
+        return mapOf(
+            "uri" to uri.toString(),
+            "displayName" to queryDisplayName(uri),
+            "mimeType" to (mime.ifBlank { contentResolver.getType(uri) ?: "" }),
+            "size" to querySize(uri),
+        )
     }
 
     private fun queryDisplayName(uri: Uri): String {
@@ -324,7 +350,9 @@ class MainActivity : FlutterActivity() {
         try {
             val output = contentResolver.openOutputStream(destination)
                 ?: throw IllegalStateException("Cannot open CodarLib output stream")
-            output.use { copySource(sourceUri, it, expectedSize) }
+            output.use {
+                copySource(sourceUri, it, expectedSize, maxBytes = MAX_IMPORT_BYTES)
+            }
             val published = contentResolver.update(destination, ContentValues().apply {
                 put(MediaStore.MediaColumns.IS_PENDING, 0)
             }, null, null)
@@ -350,7 +378,12 @@ class MainActivity : FlutterActivity() {
         val destination = uniqueLegacyFile(directory, safeFileName(name))
         try {
             FileOutputStream(destination).use { output ->
-                copySource(sourceUri, output, expectedSize)
+                copySource(
+                    sourceUri,
+                    output,
+                    expectedSize,
+                    maxBytes = MAX_IMPORT_BYTES,
+                )
             }
             return Uri.fromFile(destination).toString()
         } catch (t: Throwable) {
@@ -730,6 +763,79 @@ class MainActivity : FlutterActivity() {
                     )
                 }
         }
+    }
+
+    /**
+     * Lists the exact CodarLib tree selected through SAF. The MediaStore owner
+     * filter used by listModernMediaStore can hide files left by older installs
+     * even though they still exist in the managed directory. Prefer the stable
+     * app-owned MediaStore URI when it resolves; otherwise retain the selected
+     * tree's child URI, backed by the persistable read grant from the picker.
+     */
+    private fun listCodarLibFromTree(treeUriString: String): List<Map<String, Any>> {
+        val treeUri = Uri.parse(treeUriString)
+        if (!isCodarLibRoot(treeUriString)) {
+            throw IllegalArgumentException("Selected folder is not the CodarLib root")
+        }
+
+        val rootId = DocumentsContract.getTreeDocumentId(treeUri).trimEnd('/')
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, rootId)
+        val projection = arrayOf(
+            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_MIME_TYPE,
+            DocumentsContract.Document.COLUMN_SIZE,
+        )
+        val cursor = contentResolver.query(childrenUri, projection, null, null, null)
+            ?: throw IllegalStateException("Cannot enumerate CodarLib folder")
+        val hasPersistedReadGrant = contentResolver.persistedUriPermissions.any {
+            it.uri == treeUri && it.isReadPermission
+        }
+        val out = mutableListOf<Map<String, Any>>()
+        cursor.use {
+            val idColumn = it.getColumnIndexOrThrow(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            )
+            val nameColumn = it.getColumnIndexOrThrow(
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            )
+            val mimeColumn = it.getColumnIndexOrThrow(
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+            )
+            val sizeColumn = it.getColumnIndex(
+                DocumentsContract.Document.COLUMN_SIZE,
+            )
+            while (it.moveToNext()) {
+                // CodarLib stores managed books directly in its root. Keep the
+                // existing non-recursive listing contract and ignore folders.
+                if (it.getString(mimeColumn) == DocumentsContract.Document.MIME_TYPE_DIR) {
+                    continue
+                }
+                val childUri = DocumentsContract.buildDocumentUriUsingTree(
+                    treeUri,
+                    it.getString(idColumn),
+                )
+                val managedUri = managedMediaStoreUriFromTreeDocument(childUri)
+                val sourceUri = managedUri?.toString() ?: run {
+                    if (!hasPersistedReadGrant) {
+                        throw SecurityException("CodarLib read access was not persisted")
+                    }
+                    childUri.toString()
+                }
+                out.add(
+                    mapOf(
+                        "name" to (it.getString(nameColumn) ?: ""),
+                        "uri" to sourceUri,
+                        "size" to if (sizeColumn >= 0 && !it.isNull(sizeColumn)) {
+                            it.getLong(sizeColumn)
+                        } else {
+                            -1L
+                        },
+                    ),
+                )
+            }
+        }
+        return out
     }
 
     private fun listModernMediaStore(): List<Map<String, Any>> {

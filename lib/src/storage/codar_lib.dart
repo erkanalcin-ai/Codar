@@ -1,5 +1,5 @@
-// MediaStore-backed Downloads/CodarLib/ access.
-// No MANAGE_EXTERNAL_STORAGE. Only the app's own entries are visible.
+// MediaStore-backed Downloads/CodarLib access, with explicit SAF enumeration
+// when the user selects the verified CodarLib root. No broad storage permission.
 
 import 'package:flutter/services.dart';
 
@@ -121,6 +121,27 @@ class CodarLibStorage {
                 uri: m['uri'] as String,
                 size: (m['size'] as num?)?.toInt() ?? -1,
               ),
+        )
+        .toList();
+  }
+
+  /// Enumerates a user-selected, verified CodarLib SAF tree. Native storage
+  /// returns stable managed URIs where possible and persisted tree child URIs
+  /// for existing files whose MediaStore ownership metadata is unavailable.
+  Future<List<CodarLibFile>> listCodarLibFromTree(String treeUri) async {
+    final raw = await _ch.invokeMethod<List<dynamic>>(
+      'listCodarLibFromTree',
+      {'treeUri': treeUri},
+    );
+    if (raw == null) throw StateError('listCodarLibFromTree returned null');
+    return raw
+        .cast<Map<dynamic, dynamic>>()
+        .map(
+          (m) => CodarLibFile(
+            name: m['name'] as String,
+            uri: m['uri'] as String,
+            size: (m['size'] as num?)?.toInt() ?? -1,
+          ),
         )
         .toList();
   }
