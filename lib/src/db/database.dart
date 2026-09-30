@@ -13,10 +13,10 @@ class CodarDatabase {
   final Database db;
 
   static const _name = 'codar.db';
-  // Version 1 is the original 13-table baseline. Version 2 kept that
-  // baseline intact; version 3 adds reader brightness and independent quotes;
-  // version 4 records the coordinate unit used by persisted highlights.
-  static const version = 4;
+  // Version 1 is the original baseline. Version 3 adds reader brightness and
+  // independent quotes; version 4 records highlight offset units; version 5
+  // stores exact per-section ranges for a quote that crosses section edges.
+  static const version = 5;
 
   static Future<CodarDatabase> open({String? pathOverride}) async {
     final dir = await getApplicationDocumentsDirectory();
@@ -149,6 +149,17 @@ class CodarDatabase {
           created_at INTEGER NOT NULL
         )''');
         await db.execute('''
+        CREATE TABLE quote_ranges(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          quote_id INTEGER NOT NULL REFERENCES quotes(id) ON DELETE CASCADE,
+          range_index INTEGER NOT NULL,
+          section_index INTEGER NOT NULL,
+          start_offset INTEGER NOT NULL,
+          end_offset INTEGER NOT NULL,
+          CHECK (start_offset >= 0 AND end_offset > start_offset),
+          UNIQUE (quote_id, range_index)
+        )''');
+        await db.execute('''
         CREATE TABLE app_settings(
           key TEXT PRIMARY KEY,
           value TEXT NOT NULL DEFAULT ''
@@ -201,6 +212,19 @@ class CodarDatabase {
           await db.execute(
             "ALTER TABLE highlights ADD COLUMN offset_unit TEXT NOT NULL DEFAULT 'unknown'",
           );
+          break;
+        case 5:
+          await db.execute('''
+            CREATE TABLE quote_ranges(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              quote_id INTEGER NOT NULL REFERENCES quotes(id) ON DELETE CASCADE,
+              range_index INTEGER NOT NULL,
+              section_index INTEGER NOT NULL,
+              start_offset INTEGER NOT NULL,
+              end_offset INTEGER NOT NULL,
+              CHECK (start_offset >= 0 AND end_offset > start_offset),
+              UNIQUE (quote_id, range_index)
+            )''');
           break;
         default:
           throw StateError(

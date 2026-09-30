@@ -54,6 +54,53 @@ void main() {
 
     expect(ReaderQuoteRangeResolver.resolve(quote, [block]), isNull);
   });
+  test('saved quote segments resolve in each section without duplication', () {
+    final quote = QuoteRecord(
+      id: 7,
+      bookId: 'book',
+      sectionIndex: 2,
+      charOffset: 40,
+      cfi: 'epubcfi(test)',
+      quotedText: 'alpha\nbeta',
+      ranges: const [
+        QuoteRangeRecord(sectionIndex: 2, startOffset: 40, endOffset: 45),
+        QuoteRangeRecord(sectionIndex: 3, startOffset: 0, endOffset: 4),
+      ],
+    );
+
+    final firstSection = ReaderQuoteRangeResolver.rangesForSection(quote, 2, [
+      _mappedBlock('alpha', 40),
+    ]);
+    expect(firstSection, hasLength(1));
+    expect(firstSection.single.start, 40);
+    expect(firstSection.single.end, 45);
+    final secondSection = ReaderQuoteRangeResolver.rangesForSection(quote, 3, [
+      _mappedBlock('beta', 0),
+    ]);
+    expect(secondSection, hasLength(1));
+    expect(secondSection.single.start, 0);
+    expect(secondSection.single.end, 4);
+    expect(
+      ReaderQuoteRangeResolver.rangesForSection(quote, 4, [
+        _mappedBlock('alpha', 40),
+      ]),
+      isEmpty,
+    );
+  });
+
+  test('legacy quote remains resolvable from its original section anchor', () {
+    final quote = _quote(start: 20, text: 'target');
+    final blocks = [_mappedBlock('target', 20)];
+
+    final legacy = ReaderQuoteRangeResolver.rangesForSection(quote, 0, blocks);
+    expect(legacy, hasLength(1));
+    expect(legacy.single.start, 20);
+    expect(legacy.single.end, 26);
+    expect(
+      ReaderQuoteRangeResolver.rangesForSection(quote, 1, blocks),
+      isEmpty,
+    );
+  });
 }
 
 QuoteRecord _quote({required int start, required String text}) => QuoteRecord(

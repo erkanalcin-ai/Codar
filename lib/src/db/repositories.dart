@@ -596,58 +596,84 @@ class AnnotationsRepository {
     return rows.map(BookmarkRecord.fromMap).toList();
   }
 
-  Future<int> addQuote(QuoteRecord quote) async => _db.db.insert('quotes', {
-    'book_id': quote.bookId,
-    'section_index': quote.sectionIndex,
-    'char_offset': quote.charOffset,
-    'cfi': quote.cfi,
-    'quoted_text': quote.quotedText,
-    'created_at': _now(),
-  });
-
-  /// Atomically toggles one quote at its persisted source location.
-  /// Any legacy duplicate rows for the same selection are removed together.
-  Future<QuoteRecord?> toggleQuote(QuoteRecord quote) async =>
+  Future<int> addQuote(QuoteRecord quote) async =>
       _db.db.transaction((txn) async {
-        final where =
-            'book_id = ? AND section_index = ? AND char_offset = ? AND quoted_text = ?';
-        final whereArgs = [
-          quote.bookId,
-          quote.sectionIndex,
-          quote.charOffset,
-          quote.quotedText,
-        ];
-        final existing = await txn.query(
-          'quotes',
-          columns: ['id'],
-          where: where,
-          whereArgs: whereArgs,
-          limit: 1,
-        );
-        if (existing.isNotEmpty) {
-          await txn.delete('quotes', where: where, whereArgs: whereArgs);
-          return null;
-        }
-
-        final createdAt = _now();
         final id = await txn.insert('quotes', {
           'book_id': quote.bookId,
           'section_index': quote.sectionIndex,
           'char_offset': quote.charOffset,
           'cfi': quote.cfi,
           'quoted_text': quote.quotedText,
-          'created_at': createdAt,
+          'created_at': _now(),
         });
-        return QuoteRecord(
-          id: id,
-          bookId: quote.bookId,
-          sectionIndex: quote.sectionIndex,
-          charOffset: quote.charOffset,
-          cfi: quote.cfi,
-          quotedText: quote.quotedText,
-          createdAt: createdAt,
-        );
+        for (var index = 0; index < quote.ranges.length; index++) {
+          final range = quote.ranges[index];
+          await txn.insert('quote_ranges', {
+            'quote_id': id,
+            'range_index': index,
+            'section_index': range.sectionIndex,
+            'start_offset': range.startOffset,
+            'end_offset': range.endOffset,
+          });
+        }
+        return id;
       });
+
+  /// Atomically toggles one quote at its persisted source location.
+  /// Any legacy duplicate rows for the same selection are removed together.
+  Future<QuoteRecord?> toggleQuote(
+    QuoteRecord quote,
+  ) async => _db.db.transaction((txn) async {
+    final where =
+        'book_id = ? AND section_index = ? AND char_offset = ? AND quoted_text = ?';
+    final whereArgs = [
+      quote.bookId,
+      quote.sectionIndex,
+      quote.charOffset,
+      quote.quotedText,
+    ];
+    final existing = await txn.query(
+      'quotes',
+      columns: ['id'],
+      where: where,
+      whereArgs: whereArgs,
+      limit: 1,
+    );
+    if (existing.isNotEmpty) {
+      await txn.delete('quotes', where: where, whereArgs: whereArgs);
+      return null;
+    }
+
+    final createdAt = _now();
+    final id = await txn.insert('quotes', {
+      'book_id': quote.bookId,
+      'section_index': quote.sectionIndex,
+      'char_offset': quote.charOffset,
+      'cfi': quote.cfi,
+      'quoted_text': quote.quotedText,
+      'created_at': createdAt,
+    });
+    for (var index = 0; index < quote.ranges.length; index++) {
+      final range = quote.ranges[index];
+      await txn.insert('quote_ranges', {
+        'quote_id': id,
+        'range_index': index,
+        'section_index': range.sectionIndex,
+        'start_offset': range.startOffset,
+        'end_offset': range.endOffset,
+      });
+    }
+    return QuoteRecord(
+      id: id,
+      bookId: quote.bookId,
+      sectionIndex: quote.sectionIndex,
+      charOffset: quote.charOffset,
+      cfi: quote.cfi,
+      quotedText: quote.quotedText,
+      createdAt: createdAt,
+      ranges: List.unmodifiable(quote.ranges),
+    );
+  });
 
   Future<void> deleteQuote(int id) async {
     await _db.db.delete('quotes', where: 'id = ?', whereArgs: [id]);
@@ -660,7 +686,28 @@ class AnnotationsRepository {
       whereArgs: [bookId],
       orderBy: 'created_at DESC',
     );
-    return rows.map(QuoteRecord.fromMap).toList();
+    if (rows.isEmpty) return const [];
+    final ranges = await _db.db.query(
+      'quote_ranges',
+      where: 'quote_id IN (SELECT id FROM quotes WHERE book_id = ?)',
+      whereArgs: [bookId],
+      orderBy: 'quote_id, range_index',
+    );
+    final rangesByQuote = <int, List<QuoteRangeRecord>>{};
+    for (final range in ranges) {
+      final quoteId = range['quote_id'] as int;
+      (rangesByQuote[quoteId] ??= []).add(
+        QuoteRangeRecord(
+          sectionIndex: range['section_index'] as int,
+          startOffset: range['start_offset'] as int,
+          endOffset: range['end_offset'] as int,
+        ),
+      );
+    }
+    return rows.map((row) {
+      final quote = QuoteRecord.fromMap(row);
+      return quote.withRanges(rangesByQuote[quote.id] ?? const []);
+    }).toList();
   }
 
   Future<int> quoteCount() async {

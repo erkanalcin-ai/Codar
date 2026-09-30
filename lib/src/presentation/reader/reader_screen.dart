@@ -2093,6 +2093,14 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
               charOffset: first.start,
               cfi: _cfiOf(locator),
               quotedText: pending.text,
+              ranges: [
+                for (final range in pending.ranges)
+                  QuoteRangeRecord(
+                    sectionIndex: range.sectionIndex,
+                    startOffset: range.start,
+                    endOffset: range.end,
+                  ),
+              ],
             ),
           );
       if (!mounted) return;
@@ -2107,7 +2115,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                 quote.quotedText != pending.text,
           ),
         ];
-        _quoteHighlightsBySection.remove(first.sectionIndex);
+        _quoteHighlightsBySection.clear();
         _saving = false;
       });
       _clearSelection();
@@ -3417,8 +3425,11 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     if (blocks == null) return const [];
     final ranges = [
       for (final quote in _quotes)
-        if (quote.sectionIndex == sectionIndex)
-          ?ReaderQuoteRangeResolver.resolve(quote, blocks),
+        ...ReaderQuoteRangeResolver.rangesForSection(
+          quote,
+          sectionIndex,
+          blocks,
+        ),
     ];
     final resolved = List<ReaderQuoteRange>.unmodifiable(ranges);
     _quoteHighlightsBySection[sectionIndex] = resolved;

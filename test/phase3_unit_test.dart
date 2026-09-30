@@ -189,6 +189,18 @@ void main() {
           'quoted_text': 'alıntı ğüşöçı',
         },
       ],
+      'quotes': [
+        {'id': 9, 'book_id': 'b1', 'quoted_text': 'alıntı'},
+      ],
+      'quote_ranges': [
+        {
+          'quote_id': 9,
+          'range_index': 0,
+          'section_index': 2,
+          'start_offset': 5,
+          'end_offset': 11,
+        },
+      ],
     };
     final doc = encodeBackup({
       for (final e in rows.entries) e.key: List.of(e.value),
@@ -199,8 +211,18 @@ void main() {
     );
     expect(back['books']!.first['title'], 'İstanbul');
     expect(back['highlights']!.first['quoted_text'], 'alıntı ğüşöçı');
-    // Missing tables default to empty (forward-compatible).
+    expect(back['quote_ranges']!.single['section_index'], 2);
+    // Missing tables default to empty for backups created by an older app.
+    final legacyBack = decodeBackup(
+      jsonEncode(
+        encodeBackup({
+          for (final e in rows.entries)
+            if (e.key != 'quote_ranges') e.key: List.of(e.value),
+        }),
+      ),
+    );
     expect(back['notes'], isEmpty);
+    expect(legacyBack['quote_ranges'], isEmpty);
   });
 
   test('restored book files discard device-bound paths', () {

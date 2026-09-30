@@ -24,6 +24,7 @@ const _tables = [
   'reading_progress',
   'highlights',
   'quotes',
+  'quote_ranges',
   'notes',
   'bookmarks',
   'favorites',
@@ -203,11 +204,17 @@ class BackupService {
           'quoted_text',
         ],
       );
-      counts['quotes'] = await _mergeNatural(
+      final quoteIdMap = <int, int>{};
+      counts['quotes'] = await _mergeQuotes(
         txn,
-        'quotes',
-        _remapBookIds(t['quotes']!, bookIdMap),
-        ['book_id', 'section_index', 'char_offset', 'quoted_text'],
+        t['quotes']!,
+        bookIdMap,
+        quoteIdMap,
+      );
+      counts['quote_ranges'] = await _mergeQuoteRanges(
+        txn,
+        t['quote_ranges']!,
+        quoteIdMap,
       );
       counts['notes'] = await _mergeNatural(
         txn,
@@ -330,6 +337,81 @@ class BackupService {
       );
     }
     return remapped;
+  }
+
+  Future<int> _mergeQuotes(
+    Transaction txn,
+    List<Map<String, Object?>> rows,
+    Map<String, String> bookIdMap,
+    Map<int, int> quoteIdMap,
+  ) async {
+    var count = 0;
+    for (final source in rows) {
+      final sourceId = source['id'] as int?;
+      final sourceBookId = source['book_id'] as String?;
+      final canonicalBookId = sourceBookId == null
+          ? null
+          : bookIdMap[sourceBookId];
+      if (sourceId == null || canonicalBookId == null) continue;
+
+      final existing = await txn.query(
+        'quotes',
+        columns: ['id'],
+        where: 'book_id = ? AND section_index = ? AND char_offset = ? AND quoted_text = ?',
+        whereArgs: [
+          canonicalBookId,
+          source['section_index'],
+          source['char_offset'],
+          source['quoted_text'],
+        ],
+        limit: 1,
+      );
+      if (existing.isNotEmpty) {
+        quoteIdMap[sourceId] = existing.first['id'] as int;
+        continue;
+      }
+
+      final row = Map<String, Object?>.from(source)
+        ..remove('id')
+        ..['book_id'] = canonicalBookId;
+      final targetId = await txn.insert('quotes', row);
+      quoteIdMap[sourceId] = targetId;
+      count++;
+    }
+    return count;
+  }
+
+  Future<int> _mergeQuoteRanges(
+    Transaction txn,
+    List<Map<String, Object?>> rows,
+    Map<int, int> quoteIdMap,
+  ) async {
+    var count = 0;
+    for (final source in rows) {
+      final sourceQuoteId = source['quote_id'] as int?;
+      final targetQuoteId = sourceQuoteId == null
+          ? null
+          : quoteIdMap[sourceQuoteId];
+      if (targetQuoteId == null) continue;
+      final rangeIndex = source['range_index'];
+      final existing = await txn.query(
+        'quote_ranges',
+        columns: ['id'],
+        where: 'quote_id = ? AND range_index = ?',
+        whereArgs: [targetQuoteId, rangeIndex],
+        limit: 1,
+      );
+      if (existing.isNotEmpty) continue;
+      await txn.insert('quote_ranges', {
+        'quote_id': targetQuoteId,
+        'range_index': rangeIndex,
+        'section_index': source['section_index'],
+        'start_offset': source['start_offset'],
+        'end_offset': source['end_offset'],
+      });
+      count++;
+    }
+    return count;
   }
 
   Future<int> _mergeMappedByKey(

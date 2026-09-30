@@ -13,6 +13,25 @@ class ReaderQuoteRange {
 class ReaderQuoteRangeResolver {
   const ReaderQuoteRangeResolver._();
 
+  /// Returns only the saved segment(s) belonging to [sectionIndex]. Legacy
+  /// quotes have no segments and continue to use their original anchor/text.
+  static List<ReaderQuoteRange> rangesForSection(
+    QuoteRecord quote,
+    int sectionIndex,
+    List<ReaderBlock> blocks,
+  ) {
+    if (quote.ranges.isNotEmpty) {
+      return [
+        for (final range in quote.ranges)
+          if (range.sectionIndex == sectionIndex)
+            ReaderQuoteRange(start: range.startOffset, end: range.endOffset),
+      ];
+    }
+    if (quote.sectionIndex != sectionIndex) return const [];
+    final legacyRange = resolve(quote, blocks);
+    return legacyRange == null ? const [] : [legacyRange];
+  }
+
   static ReaderQuoteRange? resolve(
     QuoteRecord quote,
     List<ReaderBlock> blocks,

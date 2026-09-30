@@ -268,6 +268,18 @@ class ReaderSettingsData {
   };
 }
 
+class QuoteRangeRecord {
+  const QuoteRangeRecord({
+    required this.sectionIndex,
+    required this.startOffset,
+    required this.endOffset,
+  });
+
+  final int sectionIndex;
+  final int startOffset;
+  final int endOffset;
+}
+
 class QuoteRecord {
   QuoteRecord({
     this.id,
@@ -277,6 +289,7 @@ class QuoteRecord {
     required this.cfi,
     required this.quotedText,
     this.createdAt = 0,
+    this.ranges = const [],
   });
 
   final int? id;
@@ -286,6 +299,18 @@ class QuoteRecord {
   final String cfi;
   final String quotedText;
   final int createdAt;
+  final List<QuoteRangeRecord> ranges;
+
+  QuoteRecord withRanges(List<QuoteRangeRecord> value) => QuoteRecord(
+    id: id,
+    bookId: bookId,
+    sectionIndex: sectionIndex,
+    charOffset: charOffset,
+    cfi: cfi,
+    quotedText: quotedText,
+    createdAt: createdAt,
+    ranges: List.unmodifiable(value),
+  );
 
   factory QuoteRecord.fromMap(Map<String, Object?> map) => QuoteRecord(
     id: map['id'] as int?,
