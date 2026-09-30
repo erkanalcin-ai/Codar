@@ -231,6 +231,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   Offset? _pointerDown;
   bool _programmaticPageChange = false;
   Size? _paginationViewport;
+  TextScaler? _paginationTextScaler;
   bool _viewportReflowScheduled = false;
   bool _pendingViewportReflow = false;
   int _layoutReflowRevision = 0;
@@ -303,9 +304,14 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     final viewport = MediaQuery.sizeOf(context);
+    final textScaler = MediaQuery.textScalerOf(context);
     final previous = _paginationViewport;
+    final previousTextScaler = _paginationTextScaler;
     _paginationViewport = viewport;
-    if (previous != null && previous != viewport && _session != null) {
+    _paginationTextScaler = textScaler;
+    if (previous != null &&
+        (previous != viewport || previousTextScaler != textScaler) &&
+        _session != null) {
       if (!_isPdf && !_isCbz) _continuousPageCountJobRevision++;
       final revision = ++_layoutReflowRevision;
       _markLayoutReflowPending();
@@ -417,6 +423,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     final previousOffset = _currentPageOffset;
     final settings = ref.read(readerSettingsProvider);
     final viewport = MediaQuery.sizeOf(context);
+    final textScaler = _currentTextScaler;
     try {
       final pages = await _paginateBlocksCooperatively(
         _blocks,
@@ -424,6 +431,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         viewportWidth: viewport.width,
         viewportHeight: _paginationViewportHeight(viewport.height),
         engineChars: _engineChars,
+        textScaler: textScaler,
       );
       if (!mounted || revision != _layoutReflowRevision) return;
       final page = _pageForOffset(pages, previousOffset);
@@ -601,6 +609,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       await WidgetsBinding.instance.endOfFrame;
       if (!mounted) return;
       if (_isObsoleteLayout(layoutRevision)) return;
+      final paginationTextScaler = _currentTextScaler;
       final pages = <_ContinuousPage>[];
       var preparedSectionIndex = startSection;
       ReaderPageCountIndex? pageCountIndex;
@@ -633,12 +642,14 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                   index,
                   paginationSettings: paginationSettings,
                   paginationViewport: paginationViewport,
+                  paginationTextScaler: paginationTextScaler,
                   isCurrent: () => !_isObsoleteLayout(layoutRevision),
                 )
               : _reflowLoadedContinuousSection(
                   cached,
                   paginationSettings,
                   paginationViewport,
+                  textScaler: paginationTextScaler,
                   isCurrent: () => !_isObsoleteLayout(layoutRevision),
                 );
         }
@@ -690,6 +701,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                 index,
                 paginationSettings,
                 paginationViewport,
+                paginationTextScaler,
               ),
             );
             if (cachedCount != null) {
@@ -786,6 +798,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
               settings: ref.read(readerSettingsProvider),
               viewport: MediaQuery.sizeOf(context),
               counts: countsToFinish,
+              textScaler: paginationTextScaler,
               jobRevision: pageCountJobRevision,
               layoutRevision: layoutRevision,
             ),
@@ -840,6 +853,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     required ReaderSettingsData settings,
     required Size viewport,
     required ReaderPageCountAccumulator counts,
+    required TextScaler textScaler,
     required int jobRevision,
     required int? layoutRevision,
   }) async {
@@ -858,6 +872,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
           index,
           settings,
           viewport,
+          textScaler,
         );
         final cachedCount = readerPageCountCache.get(cacheKey);
         if (cachedCount != null) {
@@ -875,12 +890,14 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                 index,
                 settings: settings,
                 viewport: viewport,
+                textScaler: textScaler,
                 isCurrent: isCurrent,
               )
             : await _countLoadedContinuousSectionPages(
                 loadedSection,
                 settings: settings,
                 viewport: viewport,
+                textScaler: textScaler,
                 isCurrent: isCurrent,
               );
         if (count == null || !isCurrent()) return;
@@ -923,6 +940,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     int index, {
     ReaderSettingsData? paginationSettings,
     Size? paginationViewport,
+    TextScaler? paginationTextScaler,
     bool Function()? isCurrent,
   }) async {
     final session = _session;
@@ -932,6 +950,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     }
     final settings = paginationSettings ?? ref.read(readerSettingsProvider);
     final viewport = paginationViewport ?? MediaQuery.sizeOf(context);
+    final textScaler = paginationTextScaler ?? _currentTextScaler;
     final content = await _readerSvc.getContent(session, index);
     if (!mounted) throw StateError('reader-closed');
     if (isCurrent != null && !isCurrent()) {
@@ -956,6 +975,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       viewportWidth: viewport.width,
       viewportHeight: _paginationViewportHeight(viewport.height),
       engineChars: content.charCount.toInt(),
+      textScaler: textScaler,
       isCurrent: isCurrent,
     );
     if (isCurrent != null && !isCurrent()) {
@@ -966,7 +986,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         ? 0
         : sectionPages.length;
     readerPageCountCache.put(
-      _continuousPageCountCacheKey(index, settings, viewport),
+      _continuousPageCountCacheKey(index, settings, viewport, textScaler),
       pageCount,
     );
     return _ReaderSection(
@@ -983,6 +1003,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     _ReaderSection section,
     ReaderSettingsData settings,
     Size viewport, {
+    TextScaler? textScaler,
     bool Function()? isCurrent,
   }) async {
     final pages = await _paginateBlocksCooperatively(
@@ -991,13 +1012,19 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       viewportWidth: viewport.width,
       viewportHeight: _paginationViewportHeight(viewport.height),
       engineChars: section.engineChars,
+      textScaler: textScaler ?? _currentTextScaler,
       isCurrent: isCurrent,
     );
     if (isCurrent != null && !isCurrent()) {
       throw const _ReaderLayoutSuperseded();
     }
     readerPageCountCache.put(
-      _continuousPageCountCacheKey(section.index, settings, viewport),
+      _continuousPageCountCacheKey(
+        section.index,
+        settings,
+        viewport,
+        textScaler ?? _currentTextScaler,
+      ),
       pages.length == 1 && pages.first.blocks.isEmpty ? 0 : pages.length,
     );
     return _ReaderSection(
@@ -1014,10 +1041,16 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     int index, {
     required ReaderSettingsData settings,
     required Size viewport,
+    required TextScaler textScaler,
     bool Function()? isCurrent,
   }) async {
     if (isCurrent != null && !isCurrent()) return null;
-    final cacheKey = _continuousPageCountCacheKey(index, settings, viewport);
+    final cacheKey = _continuousPageCountCacheKey(
+      index,
+      settings,
+      viewport,
+      textScaler,
+    );
     final cachedCount = readerPageCountCache.get(cacheKey);
     if (cachedCount != null) return cachedCount;
 
@@ -1040,6 +1073,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       viewportWidth: viewport.width,
       viewportHeight: _paginationViewportHeight(viewport.height),
       engineChars: content.charCount.toInt(),
+      textScaler: textScaler,
       yieldFrame: () => WidgetsBinding.instance.endOfFrame,
       isCurrent: isCurrent ?? () => mounted,
     );
@@ -1052,6 +1086,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     _ReaderSection section, {
     required ReaderSettingsData settings,
     required Size viewport,
+    required TextScaler textScaler,
     bool Function()? isCurrent,
   }) async {
     if (isCurrent != null && !isCurrent()) return null;
@@ -1059,6 +1094,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       section.index,
       settings,
       viewport,
+      textScaler,
     );
     final cachedCount = readerPageCountCache.get(cacheKey);
     if (cachedCount != null) return cachedCount;
@@ -1072,6 +1108,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       viewportWidth: viewport.width,
       viewportHeight: _paginationViewportHeight(viewport.height),
       engineChars: section.engineChars,
+      textScaler: textScaler,
       yieldFrame: () => WidgetsBinding.instance.endOfFrame,
       isCurrent: isCurrent ?? () => mounted,
     );
@@ -1084,12 +1121,14 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     int sectionIndex,
     ReaderSettingsData settings,
     Size viewport,
+    TextScaler textScaler,
   ) => ReaderPageCountCache.layoutKeyFor(
     bookId: widget.bookId,
     sectionIndex: sectionIndex,
     settings: settings,
     viewportWidth: viewport.width,
     viewportHeight: _paginationViewportHeight(viewport.height),
+    textScaler: textScaler,
   );
 
   bool _isEmptyContinuousSection(_ReaderSection section) =>
@@ -1844,12 +1883,14 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     required double viewportWidth,
     required double viewportHeight,
     required int engineChars,
+    TextScaler? textScaler,
   }) => ReaderPagination.paginate(
     blocks,
     settings,
     viewportWidth: viewportWidth,
     viewportHeight: viewportHeight,
     engineChars: engineChars,
+    textScaler: textScaler ?? _currentTextScaler,
   );
 
   Future<List<_ReaderPage>> _paginateBlocksCooperatively(
@@ -1858,6 +1899,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     required double viewportWidth,
     required double viewportHeight,
     required int engineChars,
+    TextScaler? textScaler,
     bool Function()? isCurrent,
   }) async {
     Future<void> yieldFrame() => WidgetsBinding.instance.endOfFrame;
@@ -1868,6 +1910,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         viewportWidth: viewportWidth,
         viewportHeight: viewportHeight,
         engineChars: engineChars,
+        textScaler: textScaler ?? _currentTextScaler,
         yieldFrame: yieldFrame,
       );
     }
@@ -1877,6 +1920,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       viewportWidth: viewportWidth,
       viewportHeight: viewportHeight,
       engineChars: engineChars,
+      textScaler: textScaler ?? _currentTextScaler,
       yieldFrame: yieldFrame,
       isCurrent: isCurrent,
     );
@@ -1904,6 +1948,9 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
 
   static double _paginationViewportHeight(double height) =>
       ReaderPagination.paginationViewportHeight(height);
+
+  TextScaler get _currentTextScaler =>
+      _paginationTextScaler ?? MediaQuery.textScalerOf(context);
 
   static String _extOf(String name) {
     final i = name.lastIndexOf('.');

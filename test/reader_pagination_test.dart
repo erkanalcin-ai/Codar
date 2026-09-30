@@ -47,6 +47,108 @@ void main() {
     expect(totalPageCount, renderedPages.length);
   });
 
+  testWidgets('pagination measurement follows rendered TextScaler', (
+    tester,
+  ) async {
+    final settings = ReaderSettingsData(
+      fontFamily: 'System',
+      fontSizePx: 18,
+      lineHeight: 1.5,
+      marginPx: 48,
+      alignment: 'start',
+      theme: 'light',
+    );
+    const viewport = Size(360, 640);
+    const renderWidth = 240.0;
+    const scalers = [TextScaler.noScaling, TextScaler.linear(1.35)];
+    final text = List.filled(
+      420,
+      'Türkçe okuyucu metni, sözcükleri sayfa sonunda bölmeden akıcı biçimde gösterir. ',
+    ).join();
+    final block = TextBlock(kind: 'p', parts: [SpanPart(text)]);
+    final blocks = [block];
+
+    for (final textScaler in scalers) {
+      final pages = ReaderPagination.paginate(
+        blocks,
+        settings,
+        viewportWidth: viewport.width,
+        viewportHeight: ReaderPagination.paginationViewportHeight(
+          viewport.height,
+        ),
+        engineChars: text.length,
+        textScaler: textScaler,
+      );
+      final count = ReaderPagination.countPages(
+        blocks,
+        settings,
+        viewportWidth: viewport.width,
+        viewportHeight: ReaderPagination.paginationViewportHeight(
+          viewport.height,
+        ),
+        engineChars: text.length,
+        textScaler: textScaler,
+      );
+      expect(count, pages.length);
+      for (final page in pages.skip(1)) {
+        expect(page.startOffset, greaterThan(0));
+        expect(RegExp(r'\s').hasMatch(text[page.startOffset - 1]), isTrue);
+      }
+
+      final renderText = text.substring(0, 48);
+      final renderBlock = TextBlock(kind: 'p', parts: [SpanPart(renderText)]);
+      final style = ReaderPagination.styleForBlock(
+        renderBlock,
+        settings,
+        const Color(0xFF111111),
+      );
+      await tester.pumpWidget(
+        MediaQuery(
+          data: MediaQueryData(textScaler: textScaler),
+          child: Directionality(
+            textDirection: TextDirection.ltr,
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: SizedBox(
+                width: renderWidth,
+                child: _renderReaderTextBlock(renderBlock, settings),
+              ),
+            ),
+          ),
+        ),
+      );
+      final renderedHeight = tester.getSize(find.byType(RichText)).height;
+      final painter = TextPainter(
+        text: TextSpan(text: renderText, style: style),
+        textDirection: TextDirection.ltr,
+        textScaler: textScaler,
+      )..layout(maxWidth: renderWidth);
+      expect(renderedHeight, closeTo(painter.height, 0.01));
+    }
+
+    final defaultPages = ReaderPagination.paginate(
+      blocks,
+      settings,
+      viewportWidth: viewport.width,
+      viewportHeight: ReaderPagination.paginationViewportHeight(
+        viewport.height,
+      ),
+      engineChars: text.length,
+      textScaler: TextScaler.noScaling,
+    );
+    final scaledPages = ReaderPagination.paginate(
+      blocks,
+      settings,
+      viewportWidth: viewport.width,
+      viewportHeight: ReaderPagination.paginationViewportHeight(
+        viewport.height,
+      ),
+      engineChars: text.length,
+      textScaler: TextScaler.linear(1.35),
+    );
+    expect(scaledPages.length, greaterThan(defaultPages.length));
+  });
+
   testWidgets('cooperative pagination yields and keeps the exact page count', (
     tester,
   ) async {

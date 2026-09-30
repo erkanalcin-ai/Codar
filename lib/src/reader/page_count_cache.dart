@@ -4,6 +4,7 @@ import 'dart:math' as math;
 
 import 'package:codar/src/db/models.dart';
 import 'package:codar/src/rust/frb_generated.dart/reader/content.dart';
+import 'package:flutter/painting.dart';
 
 /// Bounded process-local cache for exact per-section page counts.
 /// It retains compact fingerprints and counts, never section content.
@@ -40,6 +41,7 @@ class ReaderPageCountCache {
     required double viewportWidth,
     required double viewportHeight,
     required int engineChars,
+    TextScaler textScaler = TextScaler.noScaling,
   }) {
     final sink = _SectionFingerprintSink();
     final encoder = utf8.encoder.startChunkedConversion(sink);
@@ -59,7 +61,7 @@ class ReaderPageCountCache {
       encoder.add(';');
     }
 
-    add('reader-page-count-v1');
+    add('reader-page-count-v2');
     add(bookId);
     add('$sectionIndex');
     add(content.index.toString());
@@ -89,6 +91,7 @@ class ReaderPageCountCache {
     add('$viewportWidth');
     add('$viewportHeight');
     add('$engineChars');
+    _addTextScaler(add, textScaler, settings);
     encoder.close();
     return sink.finish();
   }
@@ -102,11 +105,12 @@ class ReaderPageCountCache {
     required ReaderSettingsData settings,
     required double viewportWidth,
     required double viewportHeight,
+    TextScaler textScaler = TextScaler.noScaling,
   }) {
     final sink = _SectionFingerprintSink();
     final encoder = utf8.encoder.startChunkedConversion(sink);
     for (final value in [
-      'reader-page-count-layout-v1',
+      'reader-page-count-layout-v2',
       bookId,
       '$sectionIndex',
       settings.fontFamily,
@@ -119,8 +123,40 @@ class ReaderPageCountCache {
     ]) {
       encoder.add('${value.length}:$value;');
     }
+    final baseSize = settings.fontSizePx
+        .toDouble()
+        .clamp(12.0, 40.0)
+        .toDouble();
+    for (final size in [
+      baseSize,
+      baseSize * 1.2,
+      baseSize * 1.35,
+      baseSize * 1.5,
+    ]) {
+      final value = '${textScaler.scale(size)}';
+      encoder.add('${value.length}:$value;');
+    }
     encoder.close();
     return sink.finish();
+  }
+
+  static void _addTextScaler(
+    void Function(String) add,
+    TextScaler textScaler,
+    ReaderSettingsData settings,
+  ) {
+    final baseSize = settings.fontSizePx
+        .toDouble()
+        .clamp(12.0, 40.0)
+        .toDouble();
+    for (final size in [
+      baseSize,
+      baseSize * 1.2,
+      baseSize * 1.35,
+      baseSize * 1.5,
+    ]) {
+      add('${textScaler.scale(size)}');
+    }
   }
 }
 

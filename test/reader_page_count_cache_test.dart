@@ -1,6 +1,7 @@
 import 'package:codar/src/db/models.dart';
 import 'package:codar/src/reader/page_count_cache.dart';
 import 'package:codar/src/rust/frb_generated.dart/reader/content.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -28,6 +29,7 @@ void main() {
     String text = 'reader text',
     ReaderSettingsData? readerSettings,
     double width = 360,
+    TextScaler textScaler = TextScaler.noScaling,
   }) => ReaderPageCountCache.keyFor(
     bookId: 'book-1',
     sectionIndex: 0,
@@ -36,6 +38,7 @@ void main() {
     viewportWidth: width,
     viewportHeight: 600,
     engineChars: text.length,
+    textScaler: textScaler,
   );
 
   String layoutKey({
@@ -44,12 +47,14 @@ void main() {
     ReaderSettingsData? readerSettings,
     double width = 360,
     double height = 600,
+    TextScaler textScaler = TextScaler.noScaling,
   }) => ReaderPageCountCache.layoutKeyFor(
     bookId: bookId,
     sectionIndex: sectionIndex,
     settings: readerSettings ?? settings(),
     viewportWidth: width,
     viewportHeight: height,
+    textScaler: textScaler,
   );
 
   test('page count cache key changes with section content and layout', () {
@@ -59,6 +64,8 @@ void main() {
     expect(key(readerSettings: settings(size: 30)), isNot(base));
     expect(key(readerSettings: settings(margin: 80)), isNot(base));
     expect(key(width: 400), isNot(base));
+    expect(key(textScaler: TextScaler.noScaling), base);
+    expect(key(textScaler: TextScaler.linear(1.3)), isNot(base));
   });
 
   test('page count cache is bounded and reuses exact keyed counts', () {
@@ -88,6 +95,8 @@ void main() {
       expect(layoutKey(readerSettings: settings(margin: 80)), isNot(base));
       expect(layoutKey(width: 400), isNot(base));
       expect(layoutKey(height: 700), isNot(base));
+      expect(layoutKey(textScaler: TextScaler.noScaling), base);
+      expect(layoutKey(textScaler: TextScaler.linear(1.3)), isNot(base));
 
       final cache = ReaderPageCountCache();
       cache.put(base, 384);

@@ -13,6 +13,7 @@ Future<int> countReaderTotalPageCount({
   required String path,
   required ReaderSettingsData settings,
   required Size viewport,
+  TextScaler textScaler = TextScaler.noScaling,
 }) async {
   await reader.init();
   return reader.withBook(path, (session) async {
@@ -39,6 +40,7 @@ Future<int> countReaderTotalPageCount({
           viewport.height,
         ),
         engineChars: content.charCount.toInt(),
+        textScaler: textScaler,
       );
     }
     return ReaderPageCountIndex(sectionPageCounts).totalPages;
@@ -93,12 +95,14 @@ class ReaderPagination {
     required double viewportWidth,
     required double viewportHeight,
     required int engineChars,
+    TextScaler textScaler = TextScaler.noScaling,
   }) => _paginate(
     blocks,
     settings,
     viewportWidth: viewportWidth,
     viewportHeight: viewportHeight,
     engineChars: engineChars,
+    textScaler: textScaler,
     retainPages: true,
   ).pages;
 
@@ -108,12 +112,14 @@ class ReaderPagination {
     required double viewportWidth,
     required double viewportHeight,
     required int engineChars,
+    TextScaler textScaler = TextScaler.noScaling,
   }) => _paginate(
     blocks,
     settings,
     viewportWidth: viewportWidth,
     viewportHeight: viewportHeight,
     engineChars: engineChars,
+    textScaler: textScaler,
     retainPages: false,
   ).pageCount;
 
@@ -126,12 +132,14 @@ class ReaderPagination {
     required double viewportHeight,
     required int engineChars,
     required Future<void> Function() yieldFrame,
+    TextScaler textScaler = TextScaler.noScaling,
   }) async => (await _paginateCooperatively(
     blocks,
     settings,
     viewportWidth: viewportWidth,
     viewportHeight: viewportHeight,
     engineChars: engineChars,
+    textScaler: textScaler,
     retainPages: false,
     yieldFrame: yieldFrame,
   ))!.pageCount;
@@ -146,12 +154,14 @@ class ReaderPagination {
     required int engineChars,
     required Future<void> Function() yieldFrame,
     required bool Function() isCurrent,
+    TextScaler textScaler = TextScaler.noScaling,
   }) async => (await _paginateCooperatively(
     blocks,
     settings,
     viewportWidth: viewportWidth,
     viewportHeight: viewportHeight,
     engineChars: engineChars,
+    textScaler: textScaler,
     retainPages: false,
     yieldFrame: yieldFrame,
     isCurrent: isCurrent,
@@ -164,12 +174,14 @@ class ReaderPagination {
     required double viewportHeight,
     required int engineChars,
     required Future<void> Function() yieldFrame,
+    TextScaler textScaler = TextScaler.noScaling,
   }) async => (await _paginateCooperatively(
     blocks,
     settings,
     viewportWidth: viewportWidth,
     viewportHeight: viewportHeight,
     engineChars: engineChars,
+    textScaler: textScaler,
     retainPages: true,
     yieldFrame: yieldFrame,
   ))!.pages;
@@ -182,12 +194,14 @@ class ReaderPagination {
     required int engineChars,
     required Future<void> Function() yieldFrame,
     required bool Function() isCurrent,
+    TextScaler textScaler = TextScaler.noScaling,
   }) async => (await _paginateCooperatively(
     blocks,
     settings,
     viewportWidth: viewportWidth,
     viewportHeight: viewportHeight,
     engineChars: engineChars,
+    textScaler: textScaler,
     retainPages: true,
     yieldFrame: yieldFrame,
     isCurrent: isCurrent,
@@ -202,6 +216,7 @@ class ReaderPagination {
     required bool retainPages,
     required Future<void> Function() yieldFrame,
     bool Function()? isCurrent,
+    TextScaler textScaler = TextScaler.noScaling,
   }) async {
     final run = _ReaderPaginationRun(
       blocks,
@@ -209,6 +224,7 @@ class ReaderPagination {
       viewportWidth: viewportWidth,
       viewportHeight: viewportHeight,
       engineChars: engineChars,
+      textScaler: textScaler,
       retainPages: retainPages,
     );
     var workUnits = 0;
@@ -270,6 +286,7 @@ class ReaderPagination {
     required double viewportHeight,
     required int engineChars,
     required bool retainPages,
+    TextScaler textScaler = TextScaler.noScaling,
   }) {
     final run = _ReaderPaginationRun(
       blocks,
@@ -277,6 +294,7 @@ class ReaderPagination {
       viewportWidth: viewportWidth,
       viewportHeight: viewportHeight,
       engineChars: engineChars,
+      textScaler: textScaler,
       retainPages: retainPages,
     );
     run.addAll(blocks);
@@ -290,6 +308,7 @@ class ReaderPagination {
     double available,
     ReaderSettingsData settings,
     TextAlign align,
+    TextScaler textScaler,
   ) {
     final text = block.plainText;
     var step = math.min(128, text.length - start);
@@ -308,6 +327,7 @@ class ReaderPagination {
             settings,
             align,
             startOffset: start,
+            textScaler: textScaler,
           ) <=
           available) {
         best = end;
@@ -329,6 +349,7 @@ class ReaderPagination {
             settings,
             align,
             startOffset: start,
+            textScaler: textScaler,
           ) <=
           available) {
         best = end;
@@ -351,8 +372,9 @@ class ReaderPagination {
     double available,
     TextStyle style,
     double bulletWidth,
+    TextScaler textScaler,
   ) {
-    final fontSize = style.fontSize ?? 18.0;
+    final fontSize = textScaler.scale(style.fontSize ?? 18.0);
     final lineHeight = style.height ?? 1.0;
     final textWidth = math.max(
       1.0,
@@ -372,6 +394,7 @@ class ReaderPagination {
     double available,
     ReaderSettingsData settings,
     TextAlign align, {
+    required TextScaler textScaler,
     required Stopwatch frameBudget,
     required Future<void> Function() yieldFrame,
     bool Function()? isCurrent,
@@ -379,10 +402,17 @@ class ReaderPagination {
     final text = block.plainText;
     final style = styleForBlock(block, settings, const Color(0xFF111111));
     final bulletWidth = block.kind == 'li'
-        ? _measureInlineText('•', style)
+        ? _measureInlineText('•', style, textScaler)
         : 0.0;
     var step = math.min(
-      _initialProbeChars(block, width, available, style, bulletWidth),
+      _initialProbeChars(
+        block,
+        width,
+        available,
+        style,
+        bulletWidth,
+        textScaler,
+      ),
       text.length - start,
     );
     var best = start;
@@ -405,6 +435,7 @@ class ReaderPagination {
         startOffset: start,
         baseStyle: style,
         bulletWidth: bulletWidth,
+        textScaler: textScaler,
       );
       if (frameBudget.elapsedMicroseconds >= 6000) {
         await yieldFrame();
@@ -487,7 +518,15 @@ class ReaderPagination {
     double width,
     ReaderSettingsData settings,
     TextAlign align,
-  ) => _measureText(block, block.plainText, width, settings, align);
+    TextScaler textScaler,
+  ) => _measureText(
+    block,
+    block.plainText,
+    width,
+    settings,
+    align,
+    textScaler: textScaler,
+  );
 
   static double _measureText(
     TextBlock block,
@@ -498,12 +537,13 @@ class ReaderPagination {
     int startOffset = 0,
     TextStyle? baseStyle,
     double? bulletWidth,
+    TextScaler textScaler = TextScaler.noScaling,
   }) {
     final style =
         baseStyle ?? styleForBlock(block, settings, const Color(0xFF111111));
     final actualBulletWidth =
         bulletWidth ??
-        (block.kind == 'li' ? _measureInlineText('•', style) : 0.0);
+        (block.kind == 'li' ? _measureInlineText('•', style, textScaler) : 0.0);
     final painter =
         TextPainter(
           text: _styledSpanForRange(
@@ -514,6 +554,7 @@ class ReaderPagination {
           ),
           textAlign: align,
           textDirection: TextDirection.ltr,
+          textScaler: textScaler,
         )..layout(
           maxWidth: math.max(
             1.0,
@@ -556,10 +597,15 @@ class ReaderPagination {
     return TextSpan(style: baseStyle, children: children);
   }
 
-  static double _measureInlineText(String text, TextStyle style) {
+  static double _measureInlineText(
+    String text,
+    TextStyle style,
+    TextScaler textScaler,
+  ) {
     final painter = TextPainter(
       text: TextSpan(text: text, style: style),
       textDirection: TextDirection.ltr,
+      textScaler: textScaler,
     )..layout();
     return painter.width;
   }
@@ -614,6 +660,7 @@ class _ReaderPaginationRun {
     required double viewportHeight,
     required this.engineChars,
     required this.retainPages,
+    required this.textScaler,
   }) : width = math
            .max(
              120.0,
@@ -637,6 +684,7 @@ class _ReaderPaginationRun {
   final ReaderSettingsData settings;
   final int engineChars;
   final bool retainPages;
+  final TextScaler textScaler;
   final double width;
   final double height;
   final TextAlign align;
@@ -727,6 +775,7 @@ class _ReaderPaginationRun {
       math.max(1.0, available).toDouble(),
       settings,
       align,
+      textScaler,
     );
     if (end <= cursor) {
       if (_currentBlockCount > 0) {
@@ -742,7 +791,13 @@ class _ReaderPaginationRun {
       final piece = ReaderPagination._sliceBlock(block, cursor, forcedEnd);
       if (retainPages) _current.add(piece);
       _currentBlockCount++;
-      _used = ReaderPagination._measureBlock(piece, width, settings, align);
+      _used = ReaderPagination._measureBlock(
+        piece,
+        width,
+        settings,
+        align,
+        textScaler,
+      );
       if (forcedEnd < text.length) _flush();
       return forcedEnd;
     }
@@ -751,7 +806,14 @@ class _ReaderPaginationRun {
     if (retainPages) _current.add(piece);
     _currentBlockCount++;
     _used +=
-        spacing + ReaderPagination._measureBlock(piece, width, settings, align);
+        spacing +
+        ReaderPagination._measureBlock(
+          piece,
+          width,
+          settings,
+          align,
+          textScaler,
+        );
     if (end < text.length) _flush();
     return end;
   }
@@ -773,6 +835,7 @@ class _ReaderPaginationRun {
       math.max(1.0, available).toDouble(),
       settings,
       align,
+      textScaler: textScaler,
       frameBudget: frameBudget,
       yieldFrame: yieldFrame,
       isCurrent: isCurrent,
@@ -792,7 +855,13 @@ class _ReaderPaginationRun {
       final piece = ReaderPagination._sliceBlock(block, cursor, forcedEnd);
       if (retainPages) _current.add(piece);
       _currentBlockCount++;
-      _used = ReaderPagination._measureBlock(piece, width, settings, align);
+      _used = ReaderPagination._measureBlock(
+        piece,
+        width,
+        settings,
+        align,
+        textScaler,
+      );
       if (frameBudget.elapsedMicroseconds >= 6000) {
         await yieldFrame();
         if (isCurrent != null && !isCurrent()) return null;
