@@ -134,6 +134,20 @@ pub fn get_content(session_id: u64, section_index: u64) -> Result<SectionContent
     result
 }
 
+/// Section content for pagination counts. EPUB image descriptors are retained,
+/// but their archive bytes are not decompressed or transferred to Dart.
+pub fn get_content_for_page_count(
+    session_id: u64,
+    section_index: u64,
+) -> Result<SectionContent, ReaderError> {
+    let idx = section_index as usize;
+    session::with_book(session_id, |book| {
+        content::section_content_for_page_count(book, idx)
+    })
+    .ok_or(ReaderError::UnknownSession(session_id))?
+    .ok_or(ReaderError::InvalidSection(section_index))
+}
+
 /// Section index for a spine/manifest href (`None` when unknown).
 /// Used to jump from TOC chapters to content without probing.
 pub fn find_section(session_id: u64, href: String) -> Result<Option<u64>, ReaderError> {

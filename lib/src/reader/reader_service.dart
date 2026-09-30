@@ -82,6 +82,14 @@ class CodarReaderService with ChangeNotifier {
     );
   }
 
+  Future<SectionContent> getContentForPageCount(
+    ReaderSession s,
+    int sectionIndex,
+  ) => frb.getContentForPageCount(
+    sessionId: s.id,
+    sectionIndex: BigInt.from(sectionIndex),
+  );
+
   Future<int?> findSection(ReaderSession s, String href) async {
     final v = await frb.findSection(sessionId: s.id, href: href);
     return v?.toInt();

@@ -101,7 +101,62 @@ void main() {
     expect(pages.length, synchronous);
   });
 
-  test('cooperative pagination yields within a single long paragraph', () async {
+  test(
+    'cooperative pagination yields within a single long paragraph',
+    () async {
+      final settings = ReaderSettingsData(
+        fontFamily: 'System',
+        fontSizePx: 18,
+        lineHeight: 1.5,
+        marginPx: 48,
+        alignment: 'start',
+        theme: 'light',
+      );
+      const viewport = Size(360, 640);
+      final text = List.filled(
+        300,
+        'Long paragraphs should keep loading frames responsive. ',
+      ).join();
+      final blocks = [
+        TextBlock(kind: 'p', parts: [SpanPart(text)]),
+      ];
+      var yields = 0;
+      Future<void> yieldFrame() async => yields++;
+      final height = ReaderPagination.paginationViewportHeight(viewport.height);
+      final synchronous = ReaderPagination.paginate(
+        blocks,
+        settings,
+        viewportWidth: viewport.width,
+        viewportHeight: height,
+        engineChars: text.length,
+      );
+      final cooperative = await ReaderPagination.paginateCooperatively(
+        blocks,
+        settings,
+        viewportWidth: viewport.width,
+        viewportHeight: height,
+        engineChars: text.length,
+        yieldFrame: yieldFrame,
+      );
+
+      expect(yields, greaterThan(0));
+      expect(cooperative.length, synchronous.length);
+      expect(
+        [for (final page in cooperative) page.startOffset],
+        [for (final page in synchronous) page.startOffset],
+      );
+      expect(
+        [
+          for (final page in cooperative)
+            for (final block in page.blocks)
+              if (block is TextBlock) block.plainText,
+        ].join(),
+        text,
+      );
+    },
+  );
+
+  test('stale cooperative counts stop at the next safe yield point', () async {
     final settings = ReaderSettingsData(
       fontFamily: 'System',
       fontSizePx: 18,
@@ -110,45 +165,25 @@ void main() {
       alignment: 'start',
       theme: 'light',
     );
-    const viewport = Size(360, 640);
-    final text = List.filled(
-      300,
-      'Long paragraphs should keep loading frames responsive. ',
-    ).join();
-    final blocks = [TextBlock(kind: 'p', parts: [SpanPart(text)])];
+    var current = true;
     var yields = 0;
-    Future<void> yieldFrame() async => yields++;
-    final height = ReaderPagination.paginationViewportHeight(viewport.height);
-    final synchronous = ReaderPagination.paginate(
-      blocks,
+    final count = await ReaderPagination.countPagesCooperativelyUntil(
+      [
+        TextBlock(kind: 'p', parts: [SpanPart('reader text ' * 10000)]),
+      ],
       settings,
-      viewportWidth: viewport.width,
-      viewportHeight: height,
-      engineChars: text.length,
-    );
-    final cooperative = await ReaderPagination.paginateCooperatively(
-      blocks,
-      settings,
-      viewportWidth: viewport.width,
-      viewportHeight: height,
-      engineChars: text.length,
-      yieldFrame: yieldFrame,
+      viewportWidth: 360,
+      viewportHeight: 640,
+      engineChars: 120000,
+      yieldFrame: () async {
+        yields++;
+        current = false;
+      },
+      isCurrent: () => current,
     );
 
     expect(yields, greaterThan(0));
-    expect(cooperative.length, synchronous.length);
-    expect(
-      [for (final page in cooperative) page.startOffset],
-      [for (final page in synchronous) page.startOffset],
-    );
-    expect(
-      [
-        for (final page in cooperative)
-          for (final block in page.blocks)
-            if (block is TextBlock) block.plainText,
-      ].join(),
-      text,
-    );
+    expect(count, isNull);
   });
 
   testWidgets(

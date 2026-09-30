@@ -92,6 +92,36 @@ class ReaderPageCountCache {
     encoder.close();
     return sink.finish();
   }
+
+  /// Cache identity for an exact page count when the book's stable ID already
+  /// identifies its imported bytes. This lets callers reuse the count before
+  /// fetching and serializing an unopened section from the Rust session.
+  static String layoutKeyFor({
+    required String bookId,
+    required int sectionIndex,
+    required ReaderSettingsData settings,
+    required double viewportWidth,
+    required double viewportHeight,
+  }) {
+    final sink = _SectionFingerprintSink();
+    final encoder = utf8.encoder.startChunkedConversion(sink);
+    for (final value in [
+      'reader-page-count-layout-v1',
+      bookId,
+      '$sectionIndex',
+      settings.fontFamily,
+      '${settings.fontSizePx}',
+      '${settings.lineHeight}',
+      '${settings.marginPx}',
+      settings.alignment,
+      '$viewportWidth',
+      '$viewportHeight',
+    ]) {
+      encoder.add('${value.length}:$value;');
+    }
+    encoder.close();
+    return sink.finish();
+  }
 }
 
 final readerPageCountCache = ReaderPageCountCache();

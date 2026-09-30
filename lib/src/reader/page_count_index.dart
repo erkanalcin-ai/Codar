@@ -1,3 +1,33 @@
+/// Holds exact section counts while other sections are still being counted.
+/// Unknown sections remain `null` and are never treated as pages.
+class ReaderPageCountAccumulator {
+  ReaderPageCountAccumulator(int sectionCount)
+    : sectionPageCounts = List<int?>.filled(sectionCount, null) {
+    if (sectionCount < 1) {
+      throw ArgumentError.value(sectionCount, 'sectionCount');
+    }
+  }
+
+  final List<int?> sectionPageCounts;
+
+  bool get isComplete => sectionPageCounts.every((count) => count != null);
+
+  int? countFor(int sectionIndex) => sectionPageCounts[sectionIndex];
+
+  void record(int sectionIndex, int pageCount) {
+    RangeError.checkValidIndex(sectionIndex, sectionPageCounts, 'sectionIndex');
+    if (pageCount < 0) {
+      throw ArgumentError.value(pageCount, 'pageCount');
+    }
+    sectionPageCounts[sectionIndex] = pageCount;
+  }
+
+  ReaderPageCountIndex? get exactIndex {
+    if (!isComplete) return null;
+    return ReaderPageCountIndex(sectionPageCounts.cast<int>());
+  }
+}
+
 /// Stable book-wide page numbering from each section's actual paginated size.
 ///
 /// This is deliberately independent of the reader's lazy page list: a section

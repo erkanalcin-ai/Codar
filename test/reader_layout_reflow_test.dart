@@ -48,6 +48,13 @@ void main() {
         engineChars: scalar,
         yieldFrame: () async {},
       );
+      final synchronousPages = ReaderPagination.paginate(
+        [sourceBlock],
+        settings,
+        viewportWidth: viewport.width,
+        viewportHeight: viewportHeight,
+        engineChars: scalar,
+      );
       final count = ReaderPagination.countPages(
         [sourceBlock],
         settings,
@@ -62,6 +69,42 @@ void main() {
       ];
 
       expect(pages.length, count);
+      expect(
+        pages.map((page) => page.startOffset),
+        synchronousPages.map((page) => page.startOffset),
+      );
+      expect(
+        [
+          for (final page in pages)
+            [
+              for (final block in page.blocks)
+                if (block is TextBlock) block.plainText,
+            ],
+        ],
+        [
+          for (final page in synchronousPages)
+            [
+              for (final block in page.blocks)
+                if (block is TextBlock) block.plainText,
+            ],
+        ],
+      );
+      expect(
+        [
+          for (final page in pages)
+            [
+              for (final block in page.blocks)
+                if (block is TextBlock) block.sourceStartOffsets,
+            ],
+        ],
+        [
+          for (final page in synchronousPages)
+            [
+              for (final block in page.blocks)
+                if (block is TextBlock) block.sourceStartOffsets,
+            ],
+        ],
+      );
       expect(pageBlocks.map((block) => block.plainText).join(), text);
       expect(
         pageBlocks.expand((block) => block.sourceStartOffsets).toList(),

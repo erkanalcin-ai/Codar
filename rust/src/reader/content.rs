@@ -47,17 +47,70 @@ pub struct PaginationResult {
 
 pub fn section_content(book: &ebook_rs::Book, index: usize) -> Option<SectionContent> {
     let section = book.get_section(index).ok()?;
-    let html = section.processed_html.clone();
-    let images = section_html_images(book, &section.full_path, &html);
-    Some(SectionContent {
-        index: index as u64,
-        idref: section.idref,
-        href: section.href,
+    Some(section_content_from_section(book, &section, true))
+}
+
+/// Section payload for exact Flutter pagination without decompressing or
+/// crossing the bridge with image bytes. Image descriptors remain present so
+/// the page count sees the same image blocks as the render path.
+pub fn section_content_for_page_count(
+    book: &ebook_rs::Book,
+    index: usize,
+) -> Option<SectionContent> {
+    let source = book.get_section_raw(index)?;
+    let mut section = if source.raw_html.is_empty() {
+        ebook_rs::section::Section::new(
+            source.index,
+            source.idref.clone(),
+            source.href.clone(),
+            source.full_path.clone(),
+            &book.archive,
+        )
+        .ok()?
+    } else {
+        source.clone()
+    };
+    section.processed_html = section.raw_html.clone();
+    if book.opf.metadata.direction == ebook_rs::metadata::PageProgressionDirection::Rtl
+        && !section.processed_html.contains("dir=\"rtl\"")
+        && !section.processed_html.contains("dir='rtl'")
+    {
+        section.processed_html = section.processed_html.replace("<html", "<html dir=\"rtl\"");
+        if !section.processed_html.contains("dir=\"rtl\"") {
+            section.processed_html =
+                section.processed_html.replace("<body", "<body dir=\"rtl\"");
+        }
+    }
+    if !book.layout.allow_scripted_content {
+        section.strip_script_content();
+    }
+    for hook in &book.before_display_hooks {
+        hook(&mut section.processed_html, &section.full_path);
+    }
+    Some(section_content_from_section(book, &section, false))
+}
+
+fn section_content_from_section(
+    book: &ebook_rs::Book,
+    section: &ebook_rs::section::Section,
+    include_image_data: bool,
+) -> SectionContent {
+    let (html, inline_images) = if include_image_data {
+        (section.processed_html.clone(), Vec::new())
+    } else {
+        compact_embedded_image_data(&section.processed_html)
+    };
+    let images = section_html_images(book, &section.full_path, &html, include_image_data);
+    let images = images.into_iter().chain(inline_images).collect();
+    SectionContent {
+        index: section.index as u64,
+        idref: section.idref.clone(),
+        href: section.href.clone(),
         html,
-        plain_text: section.plain_text,
+        plain_text: section.plain_text.clone(),
         char_count: section.char_count as u64,
         images,
-    })
+    }
 }
 
 /// Extract exactly one PDF page and return the same text payload used by the
@@ -98,6 +151,7 @@ fn section_html_images(
     book: &ebook_rs::Book,
     section_path: &str,
     html: &str,
+    include_image_data: bool,
 ) -> Vec<SectionImage> {
     let base_dir = section_path.rsplit_once('/').map_or("", |(dir, _)| dir);
     let mut seen = std::collections::HashSet::new();
@@ -136,11 +190,7 @@ fn section_html_images(
             clean_source,
         ));
         if let Some(image_index) = kindle_embed_index(&source) {
-            let image_dir = if opf_dir.is_empty() {
-                "OEBPS"
-            } else {
-                opf_dir
-            };
+            let image_dir = if opf_dir.is_empty() { "OEBPS" } else { opf_dir };
             for extension in ["jpg", "jpeg", "png", "gif", "webp", "bmp"] {
                 candidates.push(format!(
                     "{image_dir}/images/img_{image_index:04}.{extension}"
@@ -149,9 +199,18 @@ fn section_html_images(
         }
         candidates.dedup();
 
-        let resource = candidates
-            .iter()
-            .find_map(|path| book.get_resource_bytes(path).ok());
+        let resource = candidates.iter().find_map(|path| {
+            if include_image_data {
+                book.get_resource_bytes(path).ok()
+            } else if book.archive.contains(path) {
+                Some((
+                    Vec::new(),
+                    ebook_rs::archive::EpubArchive::get_mime_type(path),
+                ))
+            } else {
+                None
+            }
+        });
         let Some((data, mime)) = resource else {
             continue;
         };
@@ -189,11 +248,9 @@ fn kindle_embed_index(source: &str) -> Option<usize> {
 }
 
 fn image_sources(html: &str) -> Vec<String> {
-    let lower = html.to_ascii_lowercase();
     let mut sources = Vec::new();
     let mut cursor = 0;
-    while let Some(relative_start) = lower[cursor..].find("<img") {
-        let start = cursor + relative_start;
+    while let Some(start) = find_ascii_case_insensitive(html, "<img", cursor) {
         let Some(relative_end) = html[start..].find('>') else {
             break;
         };
@@ -206,7 +263,26 @@ fn image_sources(html: &str) -> Vec<String> {
     sources
 }
 
+fn find_ascii_case_insensitive(text: &str, needle: &str, from: usize) -> Option<usize> {
+    let haystack = text.as_bytes().get(from..)?;
+    let needle = needle.as_bytes();
+    haystack
+        .windows(needle.len())
+        .position(|window| {
+            window
+                .iter()
+                .zip(needle)
+                .all(|(left, right)| left.eq_ignore_ascii_case(right))
+        })
+        .map(|index| from + index)
+}
+
 fn html_attribute(tag: &str, wanted: &str) -> Option<String> {
+    let (start, end) = html_attribute_range(tag, wanted)?;
+    Some(tag[start..end].to_string())
+}
+
+fn html_attribute_range(tag: &str, wanted: &str) -> Option<(usize, usize)> {
     let bytes = tag.as_bytes();
     let mut cursor = tag.find(char::is_whitespace).unwrap_or(tag.len());
     while cursor < bytes.len() {
@@ -252,18 +328,147 @@ fn html_attribute(tag: &str, wanted: &str) -> Option<String> {
                 cursor += 1;
             }
         } else {
-            while cursor < bytes.len() && !bytes[cursor].is_ascii_whitespace() && bytes[cursor] != b'>' {
+            while cursor < bytes.len()
+                && !bytes[cursor].is_ascii_whitespace()
+                && bytes[cursor] != b'>'
+            {
                 cursor += 1;
             }
         }
         if name.eq_ignore_ascii_case(wanted) {
-            return Some(tag[value_start..cursor].to_string());
+            return Some((value_start, cursor));
         }
         if quote.is_some() && cursor < bytes.len() {
             cursor += 1;
         }
     }
     None
+}
+
+fn compact_embedded_image_data(html: &str) -> (String, Vec<SectionImage>) {
+    let mut output = String::with_capacity(html.len().min(64 * 1024));
+    let mut images = Vec::new();
+    let mut copy_cursor = 0;
+    let mut scan_cursor = 0;
+    let mut changed = false;
+
+    while let Some(tag_start) = find_ascii_case_insensitive(html, "<img", scan_cursor) {
+        let Some(relative_end) = html[tag_start..].find('>') else {
+            break;
+        };
+        let tag_end = tag_start + relative_end + 1;
+        let tag = &html[tag_start..tag_end];
+        let replacement = html_attribute_range(tag, "src").and_then(|(start, end)| {
+            let source = decode_basic_html_entities(&tag[start..end]);
+            let mime = compactable_embedded_image(&source)?;
+            Some((tag_start + start, tag_start + end, mime))
+        });
+
+        if let Some((value_start, value_end, mime)) = replacement {
+            if value_start >= copy_cursor {
+                output.push_str(&html[copy_cursor..value_start]);
+                let source = if let Some(mime_type) = mime {
+                    let index = images.len();
+                    let source = format!("codar-count-image:{index}");
+                    images.push(SectionImage {
+                        source: source.clone(),
+                        mime_type,
+                        data: Vec::new(),
+                        pixel_width: 0,
+                        pixel_height: 0,
+                        data_format: "encoded".to_string(),
+                        left: 0.0,
+                        top: 0.0,
+                        display_width: 0.0,
+                        display_height: 0.0,
+                        page_width: 0.0,
+                        page_height: 0.0,
+                        rotation_degrees: 0,
+                    });
+                    source
+                } else {
+                    "about:blank".to_string()
+                };
+                output.push_str(&source);
+                copy_cursor = value_end;
+                changed = true;
+            }
+        }
+        scan_cursor = tag_end;
+    }
+
+    if !changed {
+        return (html.to_string(), images);
+    }
+    output.push_str(&html[copy_cursor..]);
+    (output, images)
+}
+
+fn compactable_embedded_image(source: &str) -> Option<Option<String>> {
+    let trimmed = source.trim();
+    let data = trimmed
+        .get(..5)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("data:"))
+        .and_then(|_| trimmed.get(5..))?;
+    if !data
+        .get(..6)
+        .is_some_and(|mime| mime.eq_ignore_ascii_case("image/"))
+    {
+        return None;
+    }
+    let Some((metadata, payload)) = data.split_once(',') else {
+        return Some(None);
+    };
+    let mut fields = metadata.split(';');
+    let raw_mime = fields.next()?.to_ascii_lowercase();
+    let mime = if raw_mime == "image/jpg" {
+        "image/jpeg"
+    } else {
+        raw_mime.as_str()
+    };
+    let supported_raster = matches!(
+        mime,
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "image/bmp"
+    );
+    if !supported_raster {
+        return Some(None);
+    }
+    let is_base64 = fields.any(|field| field.eq_ignore_ascii_case("base64"));
+    if !is_base64 {
+        return None;
+    }
+    if !supported_raster || !valid_base64_payload(payload) {
+        return Some(None);
+    }
+    Some(Some(mime.to_string()))
+}
+
+fn valid_base64_payload(payload: &str) -> bool {
+    let bytes = payload.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let padding = bytes.iter().rev().take_while(|byte| **byte == b'=').count();
+    if padding > 2 {
+        return false;
+    }
+    let content_len = bytes.len() - padding;
+    if bytes[..content_len]
+        .iter()
+        .any(|byte| !byte.is_ascii_alphanumeric() && !matches!(*byte, b'+' | b'/'))
+    {
+        return false;
+    }
+    if bytes[content_len..].iter().any(|byte| *byte != b'=') {
+        return false;
+    }
+    match padding {
+        1 if content_len % 4 != 3 => return false,
+        2 if content_len % 4 != 2 => return false,
+        0 if content_len % 4 == 1 => return false,
+        _ => {}
+    }
+    padding == 0 || bytes.len() % 4 == 0
 }
 
 fn decode_basic_html_entities(value: &str) -> String {
@@ -447,8 +652,43 @@ pub fn paginate_section(
 
 #[cfg(test)]
 mod tests {
-    use super::{image_sources, kindle_embed_index, pdf_markdown_to_html, raw_image_to_rgba};
+    use super::{
+        compact_embedded_image_data, image_sources, kindle_embed_index, pdf_markdown_to_html,
+        raw_image_to_rgba, section_content, section_content_for_page_count,
+    };
     use pdf_oxide::extractors::PixelFormat;
+
+    #[test]
+    fn count_only_epub_content_keeps_image_descriptors_without_payloads() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/count-images.epub");
+        let book = ebook_rs::Book::from_file(fixture).expect("fixture EPUB opens");
+        let rendered = section_content(&book, 0).expect("render section exists");
+        let counted = section_content_for_page_count(&book, 0).expect("count section exists");
+        assert_ne!(counted.html, rendered.html);
+        assert!(rendered.html.contains("data:image/png;base64"));
+        assert!(!counted.html.contains("iVBORw0KGgo"));
+        assert!(counted.html.contains("images/pixel.png"));
+        assert_eq!(counted.plain_text, rendered.plain_text);
+        assert_eq!(counted.char_count, rendered.char_count);
+        assert!(rendered.images.is_empty());
+        assert_eq!(counted.images.len(), 1);
+        assert_eq!(counted.images[0].source, "images/pixel.png");
+        assert_eq!(counted.images[0].mime_type, "image/png");
+        assert!(counted.images[0].data.is_empty());
+        assert!(counted.html.len() < rendered.html.len());
+    }
+
+    #[test]
+    fn count_only_strips_nonrenderable_base64_image_payloads() {
+        let html = "<img src=\"data:image/svg+xml;base64,PHN2Zz4=\"><img src=\"data:image/png;base64,invalid!\">";
+        let (count_html, images) = compact_embedded_image_data(html);
+
+        assert!(images.is_empty());
+        assert!(!count_html.contains("PHN2Zz4="));
+        assert!(!count_html.contains("invalid!"));
+        assert_eq!(count_html.matches("about:blank").count(), 2);
+    }
 
     #[test]
     fn image_source_parser_handles_common_attribute_forms() {

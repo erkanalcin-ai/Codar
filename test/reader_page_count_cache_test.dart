@@ -38,6 +38,20 @@ void main() {
     engineChars: text.length,
   );
 
+  String layoutKey({
+    String bookId = 'book-1',
+    int sectionIndex = 0,
+    ReaderSettingsData? readerSettings,
+    double width = 360,
+    double height = 600,
+  }) => ReaderPageCountCache.layoutKeyFor(
+    bookId: bookId,
+    sectionIndex: sectionIndex,
+    settings: readerSettings ?? settings(),
+    viewportWidth: width,
+    viewportHeight: height,
+  );
+
   test('page count cache key changes with section content and layout', () {
     final base = key();
     expect(key(), base);
@@ -62,4 +76,22 @@ void main() {
     expect(cache.get(second), 9);
     expect(cache.get(third), 12);
   });
+
+  test(
+    'layout key allows exact counts to be reused before section retrieval',
+    () {
+      final base = layoutKey();
+      expect(layoutKey(), base);
+      expect(layoutKey(bookId: 'another-book'), isNot(base));
+      expect(layoutKey(sectionIndex: 1), isNot(base));
+      expect(layoutKey(readerSettings: settings(size: 30)), isNot(base));
+      expect(layoutKey(readerSettings: settings(margin: 80)), isNot(base));
+      expect(layoutKey(width: 400), isNot(base));
+      expect(layoutKey(height: 700), isNot(base));
+
+      final cache = ReaderPageCountCache();
+      cache.put(base, 384);
+      expect(cache.get(layoutKey()), 384);
+    },
+  );
 }

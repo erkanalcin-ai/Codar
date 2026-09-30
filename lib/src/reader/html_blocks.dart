@@ -23,14 +23,16 @@ sealed class ReaderBlock {
 class TextBlock extends ReaderBlock {
   TextBlock({
     required this.kind,
-    required this.parts,
+    required List<SpanPart> parts,
     this.sourceStartOffsets = const [],
     this.sourceEndOffsets = const [],
-  });
+  }) : parts = List.unmodifiable(parts),
+       _plainText = parts.map((part) => part.text).join();
 
   /// 'h1'..'h6', 'p', 'li', 'quote'
   final String kind;
   final List<SpanPart> parts;
+  final String _plainText;
 
   /// Rust scalar offsets for each UTF-16 code unit in [plainText]. Both code
   /// units of a surrogate pair point to the same scalar range.
@@ -38,7 +40,7 @@ class TextBlock extends ReaderBlock {
   final List<int> sourceEndOffsets;
 
   @override
-  String get plainText => parts.map((p) => p.text).join();
+  String get plainText => _plainText;
 
   TextBlock withSourceOffsets(List<int> starts, List<int> ends) => TextBlock(
     kind: kind,
@@ -106,6 +108,7 @@ List<ReaderBlock> parseSectionHtml(
   String html, {
   List<ReaderImage> images = const [],
   bool preserveEmptyTextBlocks = false,
+  bool countOnlyImages = false,
 }) {
   final blocks = <ReaderBlock>[];
   final imageBySource = {for (final image in images) image.source: image};
@@ -201,7 +204,9 @@ List<ReaderBlock> parseSectionHtml(
         if (closing) break;
         final source = _imageSource(inner);
         if (source == null) break;
-        final image = imageBySource[source] ?? _decodeDataImage(source);
+        final image =
+            imageBySource[source] ??
+            _decodeDataImage(source, includeData: !countOnlyImages);
         if (image == null || !image.isRenderableRaster) break;
         flushText();
         final resumeKind = blockKind;
@@ -300,7 +305,7 @@ String? _attribute(String tag, String wanted) {
   return attribute?.group(1) ?? attribute?.group(2) ?? attribute?.group(3);
 }
 
-ReaderImage? _decodeDataImage(String source) {
+ReaderImage? _decodeDataImage(String source, {bool includeData = true}) {
   if (!source.toLowerCase().startsWith('data:image/')) return null;
   final comma = source.indexOf(',');
   if (comma < 0) return null;
@@ -314,7 +319,11 @@ ReaderImage? _decodeDataImage(String source) {
         ? base64.decode(encoded)
         : Uint8List.fromList(utf8.encode(Uri.decodeComponent(encoded)));
     if (bytes.isEmpty) return null;
-    return ReaderImage(source: source, mimeType: mimeType, data: bytes);
+    return ReaderImage(
+      source: source,
+      mimeType: mimeType,
+      data: includeData ? bytes : Uint8List(0),
+    );
   } on FormatException {
     return null;
   }

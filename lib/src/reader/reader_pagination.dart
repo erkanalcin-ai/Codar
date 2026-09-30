@@ -25,8 +25,11 @@ Future<int> countReaderTotalPageCount({
 
     final sectionPageCounts = List<int>.filled(sectionCount, 0);
     for (var index = 0; index < sectionCount; index++) {
-      final content = await reader.getContent(session, index);
-      final blocks = ReaderPagination.parseSectionContent(content);
+      final content = await reader.getContentForPageCount(session, index);
+      final blocks = ReaderPagination.parseSectionContent(
+        content,
+        countOnlyImages: true,
+      );
       if (blocks.isEmpty) continue;
       sectionPageCounts[index] = ReaderPagination.countPages(
         blocks,
@@ -56,6 +59,7 @@ class ReaderPagination {
   static List<ReaderBlock> parseSectionContent(
     reader_dto.SectionContent content, {
     bool preserveEmptyTextBlocks = false,
+    bool countOnlyImages = false,
   }) {
     final images = [
       for (final image in content.images)
@@ -79,6 +83,7 @@ class ReaderPagination {
       content.html,
       images: images,
       preserveEmptyTextBlocks: preserveEmptyTextBlocks,
+      countOnlyImages: countOnlyImages,
     );
   }
 
@@ -129,7 +134,28 @@ class ReaderPagination {
     engineChars: engineChars,
     retainPages: false,
     yieldFrame: yieldFrame,
-  )).pageCount;
+  ))!.pageCount;
+
+  /// Cancellable exact count for background work that becomes stale after a
+  /// Reader layout change. `null` means the caller should discard this run.
+  static Future<int?> countPagesCooperativelyUntil(
+    List<ReaderBlock> blocks,
+    ReaderSettingsData settings, {
+    required double viewportWidth,
+    required double viewportHeight,
+    required int engineChars,
+    required Future<void> Function() yieldFrame,
+    required bool Function() isCurrent,
+  }) async => (await _paginateCooperatively(
+    blocks,
+    settings,
+    viewportWidth: viewportWidth,
+    viewportHeight: viewportHeight,
+    engineChars: engineChars,
+    retainPages: false,
+    yieldFrame: yieldFrame,
+    isCurrent: isCurrent,
+  ))?.pageCount;
 
   static Future<List<ReaderPage>> paginateCooperatively(
     List<ReaderBlock> blocks,
@@ -146,9 +172,28 @@ class ReaderPagination {
     engineChars: engineChars,
     retainPages: true,
     yieldFrame: yieldFrame,
-  )).pages;
+  ))!.pages;
 
-  static Future<_PaginationResult> _paginateCooperatively(
+  static Future<List<ReaderPage>?> paginateCooperativelyUntil(
+    List<ReaderBlock> blocks,
+    ReaderSettingsData settings, {
+    required double viewportWidth,
+    required double viewportHeight,
+    required int engineChars,
+    required Future<void> Function() yieldFrame,
+    required bool Function() isCurrent,
+  }) async => (await _paginateCooperatively(
+    blocks,
+    settings,
+    viewportWidth: viewportWidth,
+    viewportHeight: viewportHeight,
+    engineChars: engineChars,
+    retainPages: true,
+    yieldFrame: yieldFrame,
+    isCurrent: isCurrent,
+  ))?.pages;
+
+  static Future<_PaginationResult?> _paginateCooperatively(
     List<ReaderBlock> blocks,
     ReaderSettingsData settings, {
     required double viewportWidth,
@@ -156,6 +201,7 @@ class ReaderPagination {
     required int engineChars,
     required bool retainPages,
     required Future<void> Function() yieldFrame,
+    bool Function()? isCurrent,
   }) async {
     final run = _ReaderPaginationRun(
       blocks,
@@ -168,13 +214,18 @@ class ReaderPagination {
     var workUnits = 0;
     final frameBudget = Stopwatch()..start();
     for (final block in blocks) {
-      workUnits = await run.addBlockCooperatively(
+      if (isCurrent != null && !isCurrent()) return null;
+      final nextWorkUnits = await run.addBlockCooperatively(
         block,
         workUnits: workUnits,
         frameBudget: frameBudget,
         yieldFrame: yieldFrame,
+        isCurrent: isCurrent,
       );
+      if (nextWorkUnits == null) return null;
+      workUnits = nextWorkUnits;
     }
+    if (isCurrent != null && !isCurrent()) return null;
     return run.finish();
   }
 
@@ -294,6 +345,120 @@ class ReaderPagination {
     return boundary > start ? boundary : best;
   }
 
+  static int _initialProbeChars(
+    TextBlock block,
+    double width,
+    double available,
+    TextStyle style,
+    double bulletWidth,
+  ) {
+    final fontSize = style.fontSize ?? 18.0;
+    final lineHeight = style.height ?? 1.0;
+    final textWidth = math.max(
+      1.0,
+      width - bulletWidth - (block.kind == 'li' ? 8.0 : 0.0),
+    );
+    final lines = math.max(1.0, available / (fontSize * lineHeight));
+    final charsPerLine = textWidth / (fontSize * 0.52);
+    // This estimate only chooses the first exact TextPainter probe. All fit
+    // decisions and final offsets still come from the same measured search.
+    return math.max(32, (lines * charsPerLine).round());
+  }
+
+  static Future<_FitEndResult?> _fitEndCooperatively(
+    TextBlock block,
+    int start,
+    double width,
+    double available,
+    ReaderSettingsData settings,
+    TextAlign align, {
+    required Stopwatch frameBudget,
+    required Future<void> Function() yieldFrame,
+    bool Function()? isCurrent,
+  }) async {
+    final text = block.plainText;
+    final style = styleForBlock(block, settings, const Color(0xFF111111));
+    final bulletWidth = block.kind == 'li'
+        ? _measureInlineText('•', style)
+        : 0.0;
+    var step = math.min(
+      _initialProbeChars(block, width, available, style, bulletWidth),
+      text.length - start,
+    );
+    var best = start;
+    var bestHeight = 0.0;
+    var high = text.length;
+
+    Future<double?> measureCandidate(String candidate) async {
+      if (isCurrent != null && !isCurrent()) return null;
+      if (frameBudget.elapsedMicroseconds >= 6000) {
+        await yieldFrame();
+        if (isCurrent != null && !isCurrent()) return null;
+        frameBudget.reset();
+      }
+      final measured = _measureText(
+        block,
+        candidate,
+        width,
+        settings,
+        align,
+        startOffset: start,
+        baseStyle: style,
+        bulletWidth: bulletWidth,
+      );
+      if (frameBudget.elapsedMicroseconds >= 6000) {
+        await yieldFrame();
+        if (isCurrent != null && !isCurrent()) return null;
+        frameBudget.reset();
+      }
+      return measured;
+    }
+
+    while (true) {
+      final end = _runeBoundaryAtOrAfter(
+        text,
+        math.min(start + step, text.length),
+      );
+      final measured = await measureCandidate(text.substring(start, end));
+      if (measured == null) return null;
+      if (measured <= available) {
+        best = end;
+        bestHeight = measured;
+        if (end == text.length) return _FitEndResult(end, bestHeight);
+        step = math.min(step * 2, text.length - start);
+      } else {
+        high = end;
+        break;
+      }
+    }
+
+    var low = best + 1;
+    while (low <= high) {
+      final end = _runeBoundaryAtOrAfter(text, (low + high) ~/ 2);
+      final measured = await measureCandidate(text.substring(start, end));
+      if (measured == null) return null;
+      if (measured <= available) {
+        best = end;
+        bestHeight = measured;
+        low = end + 1;
+      } else {
+        high = math.max(start, _previousRuneBoundary(text, end));
+      }
+    }
+    if (best <= start) return _FitEndResult(start, 0);
+    var boundary = best;
+    while (boundary > start && !RegExp(r'\s').hasMatch(text[boundary - 1])) {
+      boundary--;
+    }
+    if (boundary > start && boundary != best) {
+      final measured = await measureCandidate(text.substring(start, boundary));
+      if (measured == null) return null;
+      bestHeight = measured;
+      best = boundary;
+    }
+    return _FitEndResult(best, bestHeight);
+  }
+
   static int _runeBoundaryAtOrAfter(String text, int offset) {
     if (offset <= 0 || offset >= text.length) return offset;
     final before = text.codeUnitAt(offset - 1);
@@ -331,11 +496,14 @@ class ReaderPagination {
     ReaderSettingsData settings,
     TextAlign align, {
     int startOffset = 0,
+    TextStyle? baseStyle,
+    double? bulletWidth,
   }) {
-    final style = styleForBlock(block, settings, const Color(0xFF111111));
-    final bulletWidth = block.kind == 'li'
-        ? _measureInlineText('•', style)
-        : 0.0;
+    final style =
+        baseStyle ?? styleForBlock(block, settings, const Color(0xFF111111));
+    final actualBulletWidth =
+        bulletWidth ??
+        (block.kind == 'li' ? _measureInlineText('•', style) : 0.0);
     final painter =
         TextPainter(
           text: _styledSpanForRange(
@@ -349,7 +517,7 @@ class ReaderPagination {
         )..layout(
           maxWidth: math.max(
             1.0,
-            width - bulletWidth - (block.kind == 'li' ? 8.0 : 0.0),
+            width - actualBulletWidth - (block.kind == 'li' ? 8.0 : 0.0),
           ),
         );
     return painter.height;
@@ -502,12 +670,14 @@ class _ReaderPaginationRun {
     _parsedCursor += text.length;
   }
 
-  Future<int> addBlockCooperatively(
+  Future<int?> addBlockCooperatively(
     ReaderBlock block, {
     required int workUnits,
     required Stopwatch frameBudget,
     required Future<void> Function() yieldFrame,
+    bool Function()? isCurrent,
   }) async {
+    if (isCurrent != null && !isCurrent()) return null;
     if (block is ImageBlock) {
       _addImageBlock(block);
       return workUnits + 1;
@@ -517,10 +687,20 @@ class _ReaderPaginationRun {
     if (text.isEmpty) return workUnits;
     var cursor = 0;
     while (cursor < text.length) {
-      cursor = _addTextPiece(textBlock, cursor);
+      if (isCurrent != null && !isCurrent()) return null;
+      final nextCursor = await _addTextPieceCooperatively(
+        textBlock,
+        cursor,
+        frameBudget: frameBudget,
+        yieldFrame: yieldFrame,
+        isCurrent: isCurrent,
+      );
+      if (nextCursor == null) return null;
+      cursor = nextCursor;
       workUnits++;
       if (workUnits >= 8 || frameBudget.elapsedMicroseconds >= 6000) {
         await yieldFrame();
+        if (isCurrent != null && !isCurrent()) return null;
         workUnits = 0;
         frameBudget.reset();
       }
@@ -572,6 +752,60 @@ class _ReaderPaginationRun {
     _currentBlockCount++;
     _used +=
         spacing + ReaderPagination._measureBlock(piece, width, settings, align);
+    if (end < text.length) _flush();
+    return end;
+  }
+
+  Future<int?> _addTextPieceCooperatively(
+    TextBlock block,
+    int cursor, {
+    required Stopwatch frameBudget,
+    required Future<void> Function() yieldFrame,
+    bool Function()? isCurrent,
+  }) async {
+    final text = block.plainText;
+    final spacing = _currentBlockCount == 0 ? 0.0 : 12.0;
+    final available = height - _used - spacing;
+    final fit = await ReaderPagination._fitEndCooperatively(
+      block,
+      cursor,
+      width,
+      math.max(1.0, available).toDouble(),
+      settings,
+      align,
+      frameBudget: frameBudget,
+      yieldFrame: yieldFrame,
+      isCurrent: isCurrent,
+    );
+    if (fit == null) return null;
+    final end = fit.end;
+    if (end <= cursor) {
+      if (_currentBlockCount > 0) {
+        _flush();
+        return cursor;
+      }
+      _currentStart = _parsedCursor + cursor;
+      final forcedEnd = ReaderPagination._runeBoundaryAtOrAfter(
+        text,
+        math.min(cursor + 1, text.length),
+      );
+      final piece = ReaderPagination._sliceBlock(block, cursor, forcedEnd);
+      if (retainPages) _current.add(piece);
+      _currentBlockCount++;
+      _used = ReaderPagination._measureBlock(piece, width, settings, align);
+      if (frameBudget.elapsedMicroseconds >= 6000) {
+        await yieldFrame();
+        if (isCurrent != null && !isCurrent()) return null;
+        frameBudget.reset();
+      }
+      if (forcedEnd < text.length) _flush();
+      return forcedEnd;
+    }
+    if (_currentBlockCount == 0) _currentStart = _parsedCursor + cursor;
+    final piece = ReaderPagination._sliceBlock(block, cursor, end);
+    if (retainPages) _current.add(piece);
+    _currentBlockCount++;
+    _used += spacing + fit.height;
     if (end < text.length) _flush();
     return end;
   }
@@ -635,4 +869,11 @@ class _PaginationResult {
 
   final List<ReaderPage> pages;
   final int pageCount;
+}
+
+class _FitEndResult {
+  const _FitEndResult(this.end, this.height);
+
+  final int end;
+  final double height;
 }

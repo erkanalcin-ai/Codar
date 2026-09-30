@@ -50,6 +50,16 @@ Future<SectionContent> getContent({
   sectionIndex: sectionIndex,
 );
 
+/// Section content for pagination counts. EPUB image descriptors are retained,
+/// but their archive bytes are not decompressed or transferred to Dart.
+Future<SectionContent> getContentForPageCount({
+  required BigInt sessionId,
+  required BigInt sectionIndex,
+}) => RustLib.instance.api.crateApiReaderGetContentForPageCount(
+  sessionId: sessionId,
+  sectionIndex: sectionIndex,
+);
+
 /// Section index for a spine/manifest href (`None` when unknown).
 /// Used to jump from TOC chapters to content without probing.
 Future<BigInt?> findSection({

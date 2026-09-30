@@ -17,6 +17,8 @@ import 'package:codar/src/reader/html_blocks.dart';
 import 'package:codar/src/reader/highlight_range.dart';
 import 'package:codar/src/reader/page_count_index.dart';
 import 'package:codar/src/reader/page_count_cache.dart';
+import 'package:codar/src/reader/reader_progress_display.dart';
+import 'package:codar/src/reader/reader_page_snap.dart';
 import 'package:codar/src/reader/reader_pagination.dart';
 import 'package:codar/src/reader/reader_image_view.dart';
 import 'package:codar/src/reader/reader_service.dart';
@@ -141,6 +143,10 @@ class _PendingSelection {
   final List<_SectionSelection> ranges;
 }
 
+class _ReaderLayoutSuperseded implements Exception {
+  const _ReaderLayoutSuperseded();
+}
+
 class _SectionSelection {
   const _SectionSelection(this.sectionIndex, this.start, this.end);
   final int sectionIndex;
@@ -156,11 +162,17 @@ class _BlockSelection {
 }
 
 class _PendingProgressSave {
-  const _PendingProgressSave(this.session, this.section, this.offset);
+  const _PendingProgressSave(
+    this.session,
+    this.section,
+    this.offset,
+    this.revision,
+  );
 
   final ReaderSession session;
   final int section;
   final int offset;
+  final int revision;
 }
 
 class _ReaderScreenState extends ConsumerState<ReaderScreen> {
@@ -188,6 +200,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   List<_ReaderPage> _pages = const [];
   List<_ContinuousPage> _continuousPages = const [];
   ReaderPageCountIndex? _continuousPageCountIndex;
+  int _continuousPageCountJobRevision = 0;
   int _pageIndex = 0;
   int _continuousIndex = 0;
   String _enginePlain = '';
@@ -203,6 +216,10 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   bool _keepSelectionAfterHighlightUpdate = false;
   Offset? _selectionAnchor;
   bool _loading = true;
+  ReaderProgressDisplayMode _progressDisplayMode =
+      ReaderProgressDisplayMode.pageAndPercent;
+  double? _currentTotalProgression;
+  int _progressRequestRevision = 0;
   bool _saving = false;
   bool _bookmarkSaving = false;
   bool _controlsVisible = false;
@@ -251,6 +268,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
               previous.marginPx != next.marginPx ||
               previous.alignment != next.alignment);
       if (layoutChanged) {
+        if (!_isPdf && !_isCbz) _continuousPageCountJobRevision++;
         final revision = ++_layoutReflowRevision;
         _markLayoutReflowPending();
         if (_isPdf) {
@@ -263,7 +281,22 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         }
       }
     });
+    unawaited(_loadProgressDisplayPreference());
     _open();
+  }
+
+  Future<void> _loadProgressDisplayPreference() async {
+    try {
+      final value = await ref
+          .read(settingsRepoProvider)
+          .appValue('reader_progress_display', 'page_and_percent');
+      if (!mounted) return;
+      setState(() {
+        _progressDisplayMode = ReaderProgressDisplayMode.fromStored(value);
+      });
+    } catch (_) {
+      // A missing or unreadable optional preference uses the documented default.
+    }
   }
 
   @override
@@ -273,6 +306,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     final previous = _paginationViewport;
     _paginationViewport = viewport;
     if (previous != null && previous != viewport && _session != null) {
+      if (!_isPdf && !_isCbz) _continuousPageCountJobRevision++;
       final revision = ++_layoutReflowRevision;
       _markLayoutReflowPending();
       _scheduleViewportReflow(revision: revision);
@@ -286,6 +320,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     setState(() {
       _layoutReflowPending = true;
       _layoutReflowError = null;
+      if (!_isPdf && !_isCbz) _continuousPageCountIndex = null;
     });
   }
 
@@ -467,6 +502,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       final saved = await ref
           .read(progressRepoProvider)
           .loadProgress(widget.bookId);
+      _currentTotalProgression = _validTotalProgression(saved?.progression);
       if (widget.initialSection == null && saved != null) {
         start = saved.sectionIndex.clamp(0, info.sectionCount.toInt() - 1);
         startOffset = saved.charOffset;
@@ -558,6 +594,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       if (_activeLayoutReflowRevision == layoutRevision) return;
       _activeLayoutReflowRevision = layoutRevision;
     }
+    var pageCountJobRevision = _continuousPageCountJobRevision;
     if (layoutRevision == null) setState(() => _loading = true);
     try {
       // Give the Reader-specific loading view a frame before pagination work.
@@ -567,6 +604,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       final pages = <_ContinuousPage>[];
       var preparedSectionIndex = startSection;
       ReaderPageCountIndex? pageCountIndex;
+      ReaderPageCountAccumulator? progressiveCounts;
       if (_isPdf) {
         // Resolve the opening page before building the stream so its extracted
         // reader pages can occupy separate, fixed-height scroll entries.
@@ -581,10 +619,12 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
           );
         }
       } else {
+        pageCountJobRevision = ++_continuousPageCountJobRevision;
         final paginationSettings = ref.read(readerSettingsProvider);
         final paginationViewport = MediaQuery.sizeOf(context);
-        final sectionPageCounts = List<int>.filled(_sectionCount, 1);
-        final countedSections = List<bool>.filled(_sectionCount, false);
+        if (!_isCbz) {
+          progressiveCounts = ReaderPageCountAccumulator(_sectionCount);
+        }
 
         Future<_ReaderSection> prepareSection(int index) {
           final cached = reusableSections[index];
@@ -593,19 +633,21 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                   index,
                   paginationSettings: paginationSettings,
                   paginationViewport: paginationViewport,
+                  isCurrent: () => !_isObsoleteLayout(layoutRevision),
                 )
               : _reflowLoadedContinuousSection(
                   cached,
                   paginationSettings,
                   paginationViewport,
+                  isCurrent: () => !_isObsoleteLayout(layoutRevision),
                 );
         }
 
         void recordCount(_ReaderSection section) {
-          sectionPageCounts[section.index] = _isEmptyContinuousSection(section)
-              ? 0
-              : section.pages.length;
-          countedSections[section.index] = true;
+          progressiveCounts?.record(
+            section.index,
+            _isEmptyContinuousSection(section) ? 0 : section.pages.length,
+          );
         }
 
         var openingSection = await prepareSection(startSection);
@@ -638,31 +680,23 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         }
         preparedSectionIndex = openingSection.index;
 
-        if (!_isCbz) {
-          // Count with the exact Flutter paginator, one section at a time.
-          // Only the integer counts survive this pass; the lazy stream below
-          // still starts with placeholders for every unopened section.
+        if (progressiveCounts != null) {
+          // Reuse only exact counts for the same content identity and layout.
+          // Missing sections are counted after the opening page is visible.
           for (var index = 0; index < _sectionCount; index++) {
-            if (countedSections[index]) continue;
-            if ((index - startSection).abs() % 4 == 0) {
-              await WidgetsBinding.instance.endOfFrame;
+            if (progressiveCounts.countFor(index) != null) continue;
+            final cachedCount = readerPageCountCache.get(
+              _continuousPageCountCacheKey(
+                index,
+                paginationSettings,
+                paginationViewport,
+              ),
+            );
+            if (cachedCount != null) {
+              progressiveCounts.record(index, cachedCount);
             }
-            final cached = reusableSections[index];
-            sectionPageCounts[index] = cached == null
-                ? await _countContinuousSectionPages(
-                    index,
-                    settings: paginationSettings,
-                    viewport: paginationViewport,
-                  )
-                : await _countLoadedContinuousSectionPages(
-                    cached,
-                    settings: paginationSettings,
-                    viewport: paginationViewport,
-                  );
-            if (_isObsoleteLayout(layoutRevision)) return;
-            countedSections[index] = true;
           }
-          pageCountIndex = ReaderPageCountIndex(sectionPageCounts);
+          pageCountIndex = progressiveCounts.exactIndex;
         }
 
         for (var index = 0; index < _sectionCount; index++) {
@@ -741,19 +775,47 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         _programmaticPageChange = false;
       });
 
+      final countsToFinish = progressiveCounts;
+      if (countsToFinish != null && pageCountIndex == null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          unawaited(
+            _completeContinuousPageCounts(
+              session: session,
+              startSection: active.section.index,
+              settings: ref.read(readerSettingsProvider),
+              viewport: MediaQuery.sizeOf(context),
+              counts: countsToFinish,
+              jobRevision: pageCountJobRevision,
+              layoutRevision: layoutRevision,
+            ),
+          );
+        });
+      }
+
       if (persistProgress) {
-        await _saveProgress(session, active.section.index, effectiveOffset);
+        final progressRevision = ++_progressRequestRevision;
+        unawaited(
+          _saveProgress(
+            session,
+            active.section.index,
+            effectiveOffset,
+            revision: progressRevision,
+          ),
+        );
       }
       if (_isPdf) _requestPdfWindow(active.section.index);
       if (verifyCfi != null && verifyCfi.isNotEmpty) {
-        await _verifyCfi(session, startSection, offset, verifyCfi);
+        unawaited(_verifyCfi(session, startSection, offset, verifyCfi));
       }
       if (_pendingViewportReflow) {
         _pendingViewportReflow = false;
         _scheduleViewportReflow();
       }
     } catch (e) {
-      if (_isObsoleteLayout(layoutRevision)) return;
+      if (e is _ReaderLayoutSuperseded || _isObsoleteLayout(layoutRevision)) {
+        return;
+      }
       if (mounted) {
         if (layoutRevision != null &&
             _activeLayoutReflowRevision == layoutRevision) {
@@ -772,6 +834,88 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     }
   }
 
+  Future<void> _completeContinuousPageCounts({
+    required ReaderSession session,
+    required int startSection,
+    required ReaderSettingsData settings,
+    required Size viewport,
+    required ReaderPageCountAccumulator counts,
+    required int jobRevision,
+    required int? layoutRevision,
+  }) async {
+    bool isCurrent() =>
+        mounted &&
+        identical(session, _session) &&
+        jobRevision == _continuousPageCountJobRevision &&
+        !_isObsoleteLayout(layoutRevision);
+
+    try {
+      for (final index in _pageCountSectionOrder(startSection)) {
+        if (!isCurrent()) return;
+        if (counts.countFor(index) != null) continue;
+
+        final cacheKey = _continuousPageCountCacheKey(
+          index,
+          settings,
+          viewport,
+        );
+        final cachedCount = readerPageCountCache.get(cacheKey);
+        if (cachedCount != null) {
+          counts.record(index, cachedCount);
+          continue;
+        }
+
+        // Let the target page paint before starting exact count work for the
+        // next unopened section. Page bodies remain lazy and are discarded.
+        await WidgetsBinding.instance.endOfFrame;
+        if (!isCurrent()) return;
+        final loadedSection = _loadedContinuousSection(index);
+        final count = loadedSection == null
+            ? await _countContinuousSectionPages(
+                index,
+                settings: settings,
+                viewport: viewport,
+                isCurrent: isCurrent,
+              )
+            : await _countLoadedContinuousSectionPages(
+                loadedSection,
+                settings: settings,
+                viewport: viewport,
+                isCurrent: isCurrent,
+              );
+        if (count == null || !isCurrent()) return;
+        counts.record(index, count);
+      }
+
+      final exactIndex = counts.exactIndex;
+      if (exactIndex == null || !isCurrent()) return;
+      setState(() => _continuousPageCountIndex = exactIndex);
+    } catch (error) {
+      if (isCurrent()) {
+        debugPrint('Reader exact page count was not completed: $error');
+      }
+    }
+  }
+
+  Iterable<int> _pageCountSectionOrder(int startSection) sync* {
+    yield startSection;
+    for (var distance = 1; distance < _sectionCount; distance++) {
+      final next = startSection + distance;
+      if (next < _sectionCount) yield next;
+      final previous = startSection - distance;
+      if (previous >= 0) yield previous;
+    }
+  }
+
+  _ReaderSection? _loadedContinuousSection(int index) {
+    for (final page in _continuousPages) {
+      if (page.section.index == index && !page.section.isPlaceholder) {
+        return page.section;
+      }
+    }
+    return null;
+  }
+
   bool _isObsoleteLayout(int? revision) =>
       revision != null && revision != _layoutReflowRevision;
 
@@ -779,13 +923,20 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     int index, {
     ReaderSettingsData? paginationSettings,
     Size? paginationViewport,
+    bool Function()? isCurrent,
   }) async {
     final session = _session;
     if (session == null) throw StateError('reader-closed');
+    if (isCurrent != null && !isCurrent()) {
+      throw const _ReaderLayoutSuperseded();
+    }
     final settings = paginationSettings ?? ref.read(readerSettingsProvider);
     final viewport = paginationViewport ?? MediaQuery.sizeOf(context);
     final content = await _readerSvc.getContent(session, index);
     if (!mounted) throw StateError('reader-closed');
+    if (isCurrent != null && !isCurrent()) {
+      throw const _ReaderLayoutSuperseded();
+    }
     final blocks = _parseReaderBlocks(content);
     final storedHighlights = await ref
         .read(annotationsRepoProvider)
@@ -796,24 +947,27 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       blocks,
       storedHighlights,
     );
+    if (isCurrent != null && !isCurrent()) {
+      throw const _ReaderLayoutSuperseded();
+    }
     final sectionPages = await _paginateBlocksCooperatively(
       blocks,
       settings!,
       viewportWidth: viewport.width,
       viewportHeight: _paginationViewportHeight(viewport.height),
       engineChars: content.charCount.toInt(),
+      isCurrent: isCurrent,
     );
+    if (isCurrent != null && !isCurrent()) {
+      throw const _ReaderLayoutSuperseded();
+    }
+    final pageCount =
+        sectionPages.length == 1 && sectionPages.first.blocks.isEmpty
+        ? 0
+        : sectionPages.length;
     readerPageCountCache.put(
-      ReaderPageCountCache.keyFor(
-        bookId: widget.bookId,
-        sectionIndex: index,
-        content: content,
-        settings: settings,
-        viewportWidth: viewport.width,
-        viewportHeight: _paginationViewportHeight(viewport.height),
-        engineChars: content.charCount.toInt(),
-      ),
-      sectionPages.length,
+      _continuousPageCountCacheKey(index, settings, viewport),
+      pageCount,
     );
     return _ReaderSection(
       index: index,
@@ -828,14 +982,23 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   Future<_ReaderSection> _reflowLoadedContinuousSection(
     _ReaderSection section,
     ReaderSettingsData settings,
-    Size viewport,
-  ) async {
+    Size viewport, {
+    bool Function()? isCurrent,
+  }) async {
     final pages = await _paginateBlocksCooperatively(
       section.blocks,
       settings,
       viewportWidth: viewport.width,
       viewportHeight: _paginationViewportHeight(viewport.height),
       engineChars: section.engineChars,
+      isCurrent: isCurrent,
+    );
+    if (isCurrent != null && !isCurrent()) {
+      throw const _ReaderLayoutSuperseded();
+    }
+    readerPageCountCache.put(
+      _continuousPageCountCacheKey(section.index, settings, viewport),
+      pages.length == 1 && pages.first.blocks.isEmpty ? 0 : pages.length,
     );
     return _ReaderSection(
       index: section.index,
@@ -847,55 +1010,87 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     );
   }
 
-  Future<int> _countContinuousSectionPages(
+  Future<int?> _countContinuousSectionPages(
     int index, {
     required ReaderSettingsData settings,
     required Size viewport,
+    bool Function()? isCurrent,
   }) async {
-    final session = _session;
-    if (session == null) throw StateError('reader-closed');
-    final content = await _readerSvc.getContent(session, index);
-    if (!mounted) throw StateError('reader-closed');
-    final cacheKey = ReaderPageCountCache.keyFor(
-      bookId: widget.bookId,
-      sectionIndex: index,
-      content: content,
-      settings: settings,
-      viewportWidth: viewport.width,
-      viewportHeight: _paginationViewportHeight(viewport.height),
-      engineChars: content.charCount.toInt(),
-    );
+    if (isCurrent != null && !isCurrent()) return null;
+    final cacheKey = _continuousPageCountCacheKey(index, settings, viewport);
     final cachedCount = readerPageCountCache.get(cacheKey);
     if (cachedCount != null) return cachedCount;
-    final blocks = ReaderPagination.parseSectionContent(content);
-    if (blocks.isEmpty) return 0;
-    final count = await ReaderPagination.countPagesCooperatively(
+
+    final session = _session;
+    if (session == null) throw StateError('reader-closed');
+    final content = await _readerSvc.getContentForPageCount(session, index);
+    if (!mounted) throw StateError('reader-closed');
+    if (isCurrent != null && !isCurrent()) return null;
+    final blocks = ReaderPagination.parseSectionContent(
+      content,
+      countOnlyImages: true,
+    );
+    if (blocks.isEmpty) {
+      readerPageCountCache.put(cacheKey, 0);
+      return 0;
+    }
+    final count = await ReaderPagination.countPagesCooperativelyUntil(
       blocks,
       settings,
       viewportWidth: viewport.width,
       viewportHeight: _paginationViewportHeight(viewport.height),
       engineChars: content.charCount.toInt(),
       yieldFrame: () => WidgetsBinding.instance.endOfFrame,
+      isCurrent: isCurrent ?? () => mounted,
     );
+    if (count == null || (isCurrent != null && !isCurrent())) return null;
     readerPageCountCache.put(cacheKey, count);
     return count;
   }
 
-  Future<int> _countLoadedContinuousSectionPages(
+  Future<int?> _countLoadedContinuousSectionPages(
     _ReaderSection section, {
     required ReaderSettingsData settings,
     required Size viewport,
-  }) {
-    if (section.blocks.isEmpty) return Future.value(0);
-    return ReaderPagination.countPagesCooperatively(
+    bool Function()? isCurrent,
+  }) async {
+    if (isCurrent != null && !isCurrent()) return null;
+    final cacheKey = _continuousPageCountCacheKey(
+      section.index,
+      settings,
+      viewport,
+    );
+    final cachedCount = readerPageCountCache.get(cacheKey);
+    if (cachedCount != null) return cachedCount;
+    if (section.blocks.isEmpty) {
+      readerPageCountCache.put(cacheKey, 0);
+      return 0;
+    }
+    final count = await ReaderPagination.countPagesCooperativelyUntil(
       section.blocks,
       settings,
       viewportWidth: viewport.width,
       viewportHeight: _paginationViewportHeight(viewport.height),
       engineChars: section.engineChars,
       yieldFrame: () => WidgetsBinding.instance.endOfFrame,
+      isCurrent: isCurrent ?? () => mounted,
     );
+    if (count == null || (isCurrent != null && !isCurrent())) return null;
+    readerPageCountCache.put(cacheKey, count);
+    return count;
   }
+
+  String _continuousPageCountCacheKey(
+    int sectionIndex,
+    ReaderSettingsData settings,
+    Size viewport,
+  ) => ReaderPageCountCache.layoutKeyFor(
+    bookId: widget.bookId,
+    sectionIndex: sectionIndex,
+    settings: settings,
+    viewportWidth: viewport.width,
+    viewportHeight: _paginationViewportHeight(viewport.height),
+  );
 
   bool _isEmptyContinuousSection(_ReaderSection section) =>
       section.pages.length == 1 && section.pages.first.blocks.isEmpty;
@@ -1484,8 +1679,49 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     }
   }
 
+  void _snapEpubPageAfterScroll(ScrollMetrics metrics) {
+    if (_isPdf || _isCbz || !_scrollController.hasClients) return;
+    final target = readerPageSnapTarget(
+      pixels: metrics.pixels,
+      pageExtent: _readerPageExtent,
+      minScrollExtent: metrics.minScrollExtent,
+      maxScrollExtent: metrics.maxScrollExtent,
+    );
+    if (target == null || (target - metrics.pixels).abs() < 1) return;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      final position = _scrollController.position;
+      if (position.isScrollingNotifier.value) return;
+      final currentTarget = readerPageSnapTarget(
+        pixels: position.pixels,
+        pageExtent: _readerPageExtent,
+        minScrollExtent: position.minScrollExtent,
+        maxScrollExtent: position.maxScrollExtent,
+      );
+      if (currentTarget == null ||
+          (currentTarget - position.pixels).abs() < 1) {
+        return;
+      }
+      unawaited(
+        _scrollController.animateTo(
+          currentTarget,
+          duration: const Duration(milliseconds: 140),
+          curve: Curves.easeOutCubic,
+        ),
+      );
+    });
+  }
+
   void _queueProgressSave(ReaderSession session, int section, int offset) {
-    _pendingProgressSave = _PendingProgressSave(session, section, offset);
+    final revision = ++_progressRequestRevision;
+    _currentTotalProgression = null;
+    _pendingProgressSave = _PendingProgressSave(
+      session,
+      section,
+      offset,
+      revision,
+    );
     _progressSaveTimer?.cancel();
     _progressSaveTimer = Timer(const Duration(milliseconds: 300), () {
       _drainProgressSave();
@@ -1499,7 +1735,12 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     _pendingProgressSave = null;
     if (pending == null) return;
     _progressSaveTail = _progressSaveTail.then(
-      (_) => _saveProgress(pending.session, pending.section, pending.offset),
+      (_) => _saveProgress(
+        pending.session,
+        pending.section,
+        pending.offset,
+        revision: pending.revision,
+      ),
     );
   }
 
@@ -1509,7 +1750,12 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     _pendingProgressSave = null;
     await _progressSaveTail;
     if (pending != null) {
-      await _saveProgress(pending.session, pending.section, pending.offset);
+      await _saveProgress(
+        pending.session,
+        pending.section,
+        pending.offset,
+        revision: pending.revision,
+      );
     }
     await _readerSvc.closeSession(session);
   }
@@ -1560,8 +1806,10 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   Future<void> _saveProgress(
     ReaderSession session,
     int section,
-    int offset,
-  ) async {
+    int offset, {
+    int? revision,
+  }) async {
+    final requestRevision = revision ?? ++_progressRequestRevision;
     try {
       final p = await _readerSvc.getProgress(session, section, offset);
       await _progressRepo.saveProgress(
@@ -1571,10 +1819,24 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         charOffset: offset,
         progression: p.totalProgression,
       );
+      if (mounted && requestRevision == _progressRequestRevision) {
+        final current = _validTotalProgression(p.totalProgression);
+        if (_currentTotalProgression != current) {
+          setState(() => _currentTotalProgression = current);
+        }
+      }
     } catch (_) {
       // Progress is best-effort per navigation; the book stays readable.
     }
   }
+
+  static double? _validTotalProgression(double? progression) =>
+      progression != null &&
+          progression.isFinite &&
+          progression >= 0 &&
+          progression <= 1
+      ? progression
+      : null;
 
   List<_ReaderPage> _paginateBlocks(
     List<ReaderBlock> blocks,
@@ -1596,14 +1858,31 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     required double viewportWidth,
     required double viewportHeight,
     required int engineChars,
-  }) => ReaderPagination.paginateCooperatively(
-    blocks,
-    settings,
-    viewportWidth: viewportWidth,
-    viewportHeight: viewportHeight,
-    engineChars: engineChars,
-    yieldFrame: () => WidgetsBinding.instance.endOfFrame,
-  );
+    bool Function()? isCurrent,
+  }) async {
+    Future<void> yieldFrame() => WidgetsBinding.instance.endOfFrame;
+    if (isCurrent == null) {
+      return ReaderPagination.paginateCooperatively(
+        blocks,
+        settings,
+        viewportWidth: viewportWidth,
+        viewportHeight: viewportHeight,
+        engineChars: engineChars,
+        yieldFrame: yieldFrame,
+      );
+    }
+    final pages = await ReaderPagination.paginateCooperativelyUntil(
+      blocks,
+      settings,
+      viewportWidth: viewportWidth,
+      viewportHeight: viewportHeight,
+      engineChars: engineChars,
+      yieldFrame: yieldFrame,
+      isCurrent: isCurrent,
+    );
+    if (pages == null) throw const _ReaderLayoutSuperseded();
+    return pages;
+  }
 
   int _pageForOffset(List<_ReaderPage> pages, int offset) {
     if (pages.length <= 1 || offset <= 0) return 0;
@@ -2186,6 +2465,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
 
   Future<void> _showReaderSettings(String locale) async {
     var draft = ref.read(readerSettingsProvider);
+    var progressDisplayDraft = _progressDisplayMode;
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -2318,6 +2598,77 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                       onChanged: (value) =>
                           update(draft.copyWith(alignment: value)),
                     ),
+                    if (!_isPdf && !_isCbz)
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(tr(locale, 'readerProgressDisplay')),
+                          ),
+                          DropdownButton<ReaderProgressDisplayMode>(
+                            value: progressDisplayDraft,
+                            underline: const SizedBox.shrink(),
+                            items: [
+                              for (final mode
+                                  in ReaderProgressDisplayMode.values)
+                                DropdownMenuItem(
+                                  value: mode,
+                                  child: Text(
+                                    tr(locale, switch (mode) {
+                                      ReaderProgressDisplayMode
+                                          .pageAndPercent =>
+                                        'progressPageAndPercent',
+                                      ReaderProgressDisplayMode.pageOnly =>
+                                        'progressPageOnly',
+                                      ReaderProgressDisplayMode.percentOnly =>
+                                        'progressPercentOnly',
+                                      ReaderProgressDisplayMode.hidden =>
+                                        'progressHidden',
+                                    }),
+                                  ),
+                                ),
+                            ],
+                            onChanged: (mode) {
+                              if (mode == null ||
+                                  mode == progressDisplayDraft) {
+                                return;
+                              }
+                              final previous = progressDisplayDraft;
+                              progressDisplayDraft = mode;
+                              setSheetState(() {});
+                              setState(() => _progressDisplayMode = mode);
+                              unawaited(() async {
+                                try {
+                                  await ref
+                                      .read(settingsRepoProvider)
+                                      .setAppValue(
+                                        'reader_progress_display',
+                                        mode.storageValue,
+                                      );
+                                } catch (_) {
+                                  if (!mounted ||
+                                      _progressDisplayMode != mode) {
+                                    return;
+                                  }
+                                  setState(
+                                    () => _progressDisplayMode = previous,
+                                  );
+                                  if (sheetContext.mounted) {
+                                    progressDisplayDraft = previous;
+                                    setSheetState(() {});
+                                  }
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                        tr(locale, 'settingsSaveFailed'),
+                                      ),
+                                    ),
+                                  );
+                                }
+                              }());
+                            },
+                          ),
+                        ],
+                      ),
                     Row(
                       children: [
                         Expanded(child: Text(tr(locale, 'theme'))),
@@ -2401,7 +2752,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         : _pages[_pageIndex.clamp(0, _pages.length - 1).toInt()].startOffset;
   }
 
-  int _displayContinuousPageIndex(int index) {
+  int? _displayContinuousPageIndex(int index) {
     if ((_isPdf || _isCbz) && index >= 0 && index < _continuousPages.length) {
       return _continuousPages[index].section.index;
     }
@@ -2415,12 +2766,12 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         );
       }
     }
-    return index;
+    return null;
   }
 
-  int get _displayContinuousPageCount => (_isPdf || _isCbz)
+  int? get _displayContinuousPageCount => (_isPdf || _isCbz)
       ? _sectionCount
-      : _continuousPageCountIndex?.totalPages ?? _continuousPages.length;
+      : _continuousPageCountIndex?.totalPages;
 
   void _scheduleControlsHide() {
     _controlsTimer?.cancel();
@@ -2669,7 +3020,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         : _pages;
     if (pages.isEmpty) return const SizedBox.shrink();
     if (_continuousPages.isNotEmpty) {
-      return ListView.builder(
+      final continuousList = ListView.builder(
         controller: _scrollController,
         padding: EdgeInsets.zero,
         itemExtent: _readerPageExtent,
@@ -2684,6 +3035,16 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
           margin,
           align,
         ),
+      );
+      if (_isPdf || _isCbz) return continuousList;
+      return NotificationListener<ScrollEndNotification>(
+        onNotification: (notification) {
+          if (notification.depth == 0) {
+            _snapEpubPageAfterScroll(notification.metrics);
+          }
+          return false;
+        },
+        child: continuousList,
       );
     }
     return PageView.builder(
@@ -2807,6 +3168,13 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     final page = _isPdf && entry.sectionPageIndex < section.pages.length
         ? section.pages[entry.sectionPageIndex]
         : entry.page;
+    final displayPage = _displayContinuousPageIndex(index);
+    final displayTotal = _displayContinuousPageCount;
+    final pageLabel = displayPage != null && displayTotal != null
+        ? '${tr(locale, 'pageOf')} ${displayPage + 1} / $displayTotal'
+        : '${tr(locale, 'sectionOf')} ${entry.section.index + 1} / '
+              '$_sectionCount · ${tr(locale, 'pageOf')} '
+              '${entry.sectionPageIndex + 1}';
     final contentBlocks = page.blocks;
     final contentColumn = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2834,11 +3202,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       key: ValueKey(
         'reader-page-${entry.section.index}-${entry.sectionPageIndex}',
       ),
-      label: _isPdf
-          ? '${tr(locale, 'pageOf')} ${entry.section.index + 1} / $_sectionCount'
-          : '${tr(locale, 'pageOf')} '
-                '${_displayContinuousPageIndex(index) + 1} / '
-                '$_displayContinuousPageCount',
+      label: pageLabel,
       child: SizedBox(
         height: _readerPageExtent,
         child: Padding(
@@ -3190,16 +3554,42 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                     ValueListenableBuilder<int>(
                       valueListenable: _continuousPageNotifier,
                       builder: (context, pageIndex, _) {
+                        if (!_isPdf &&
+                            !_isCbz &&
+                            !_progressDisplayMode.showsPage) {
+                          return const SizedBox.shrink();
+                        }
+                        final hasEntry =
+                            pageIndex >= 0 &&
+                            pageIndex < _continuousPages.length;
+                        final entry = hasEntry
+                            ? _continuousPages[pageIndex]
+                            : null;
                         final displayIndex = _displayContinuousPageIndex(
                           pageIndex,
                         );
                         final displayCount = _displayContinuousPageCount;
-                        final value = '${displayIndex + 1} / $displayCount';
+                        final value =
+                            displayIndex != null && displayCount != null
+                            ? '${displayIndex + 1} / $displayCount'
+                            : entry == null
+                            ? '—'
+                            : '${tr(locale, 'sectionOf')} '
+                                  '${entry.section.index + 1} · '
+                                  '${tr(locale, 'pageOf')} '
+                                  '${entry.sectionPageIndex + 1}';
+                        final semanticsValue =
+                            displayIndex != null && displayCount != null
+                            ? value
+                            : entry == null
+                            ? tr(locale, 'loading')
+                            : '${tr(locale, 'sectionOf')} '
+                                  '${entry.section.index + 1} / $_sectionCount, '
+                                  '${tr(locale, 'pageOf')} '
+                                  '${entry.sectionPageIndex + 1}';
                         return Semantics(
                           label: tr(locale, 'pageOf'),
-                          value: _continuousPages.isEmpty
-                              ? tr(locale, 'loading')
-                              : '${displayIndex + 1} / $displayCount',
+                          value: semanticsValue,
                           child: Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 4),
                             child: Text(
@@ -3260,7 +3650,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   }
 
   Widget _readerBottomControls(String locale, ReaderThemeColors colors) {
-    final total = _continuousPages.isNotEmpty
+    final navigationCount = _continuousPages.isNotEmpty
         ? _continuousPages.length
         : _pages.length;
     return Positioned(
@@ -3292,18 +3682,72 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                   final current = _continuousPages.isNotEmpty
                       ? pageIndex
                       : _pageIndex;
-                  final displayCurrent = _continuousPages.isNotEmpty
+                  final entry =
+                      _continuousPages.isNotEmpty &&
+                          pageIndex >= 0 &&
+                          pageIndex < _continuousPages.length
+                      ? _continuousPages[pageIndex]
+                      : null;
+                  final localPageIndex = entry?.sectionPageIndex ?? _pageIndex;
+                  final sectionIndex = entry?.section.index ?? _section;
+                  final fixedPageFormat = _isPdf || _isCbz;
+                  final displayIndex = _continuousPages.isNotEmpty
                       ? _displayContinuousPageIndex(pageIndex)
                       : _pageIndex;
                   final displayTotal = _continuousPages.isNotEmpty
                       ? _displayContinuousPageCount
-                      : total;
-                  final progress = displayTotal <= 1
-                      ? 0.0
-                      : displayCurrent / (displayTotal - 1);
-                  final positionLabel =
-                      '${tr(locale, 'sectionOf')} ${_section + 1} / $_sectionCount · '
-                      '${tr(locale, 'pageOf')} ${displayCurrent + 1} / $displayTotal';
+                      : _pages.length;
+                  final exactProgress =
+                      displayIndex != null &&
+                          displayTotal != null &&
+                          displayTotal > 0
+                      ? ((displayIndex + 1) / displayTotal)
+                            .clamp(0.0, 1.0)
+                            .toDouble()
+                      : null;
+                  final progressValue = fixedPageFormat
+                      ? displayIndex == null ||
+                                displayTotal == null ||
+                                displayTotal <= 1
+                            ? 0.0
+                            : (displayIndex / (displayTotal - 1))
+                                  .clamp(0.0, 1.0)
+                                  .toDouble()
+                      : exactProgress ?? _currentTotalProgression;
+                  final percentLabel = progressValue == null
+                      ? null
+                      : '${(progressValue * 100).round()}%';
+                  final exactPageLabel =
+                      displayIndex != null && displayTotal != null
+                      ? '${tr(locale, 'pageOf')} ${displayIndex + 1} / $displayTotal'
+                      : null;
+                  final pageLabel =
+                      exactPageLabel ??
+                      '${tr(locale, 'sectionOf')} ${sectionIndex + 1} / '
+                          '$_sectionCount · ${tr(locale, 'pageOf')} '
+                          '${localPageIndex + 1}';
+                  final positionLabel = fixedPageFormat
+                      ? displayIndex == null || displayTotal == null
+                            ? null
+                            : '${tr(locale, 'sectionOf')} ${sectionIndex + 1} / '
+                                  '$_sectionCount · ${tr(locale, 'pageOf')} '
+                                  '${displayIndex + 1} / $displayTotal'
+                      : switch (_progressDisplayMode) {
+                          ReaderProgressDisplayMode.pageAndPercent =>
+                            exactPageLabel == null
+                                ? '${tr(locale, 'sectionOf')} ${sectionIndex + 1} / '
+                                      '$_sectionCount'
+                                      '${percentLabel == null ? '' : ' · $percentLabel'}'
+                                : '$pageLabel'
+                                      '${percentLabel == null ? '' : ' · $percentLabel'}',
+                          ReaderProgressDisplayMode.pageOnly => pageLabel,
+                          ReaderProgressDisplayMode.percentOnly => percentLabel,
+                          ReaderProgressDisplayMode.hidden => null,
+                        };
+                  final showProgressBar =
+                      fixedPageFormat ||
+                      (_progressDisplayMode.showsPercent &&
+                          progressValue != null);
                   return Padding(
                     padding: const EdgeInsets.fromLTRB(12, 18, 12, 2),
                     child: Row(
@@ -3327,29 +3771,31 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              ConstrainedBox(
-                                constraints: const BoxConstraints(
-                                  maxWidth: 180,
+                              if (showProgressBar) ...[
+                                ConstrainedBox(
+                                  constraints: const BoxConstraints(
+                                    maxWidth: 180,
+                                  ),
+                                  child: LinearProgressIndicator(
+                                    value: progressValue,
+                                    minHeight: 2,
+                                    color: colors.text,
+                                    backgroundColor: colors.progressTrack,
+                                  ),
                                 ),
-                                child: LinearProgressIndicator(
-                                  value: progress,
-                                  minHeight: 2,
-                                  color: colors.text,
-                                  backgroundColor: colors.progressTrack,
+                                if (positionLabel != null)
+                                  const SizedBox(height: 6),
+                              ],
+                              if (positionLabel != null)
+                                Text(
+                                  positionLabel,
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    color: colors.weak,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                  ),
                                 ),
-                              ),
-                              const SizedBox(height: 6),
-                              Text(
-                                total == 0
-                                    ? tr(locale, 'loading')
-                                    : positionLabel,
-                                textAlign: TextAlign.center,
-                                style: TextStyle(
-                                  color: colors.weak,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
                             ],
                           ),
                         ),
@@ -3357,7 +3803,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                           tooltip: tr(locale, 'nextPage'),
                           color: colors.text,
                           icon: const Icon(Icons.keyboard_arrow_down_rounded),
-                          onPressed: current < total - 1
+                          onPressed: current < navigationCount - 1
                               ? () => _continuousPages.isNotEmpty
                                     ? _scrollToContinuousIndex(current + 1)
                                     : _pageController.nextPage(
